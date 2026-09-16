@@ -321,8 +321,14 @@ def index():
 def upload():
     if request.method == "GET":
         body = """<section class='card'>
-        <h1>Añadir captura</h1>
-        <p>Sube una imagen o <strong>pega directamente del portapapeles (Ctrl + V)</strong>.</p>
+        <div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;'>
+            <h1 style='margin:0;'>Añadir captura</h1>
+            <div style='display:flex;align-items:center;gap:8px;'>
+                <span title='Copia este prompt y pégalo en una IA junto a tu foto con el móvil para que te la convierta en una captura impecable antes de subirla.' style='cursor:help;font-size:20px;'>ℹ️</span>
+                <button type='button' class='btn' id='copyPromptBtn' onclick='copyPrompt()' style='padding:6px 12px;font-size:14px;'>📋 Copiar Prompt IA</button>
+            </div>
+        </div>
+        <p style='margin-top:15px;'>Sube una imagen o <strong>pega directamente del portapapeles (Ctrl + V)</strong>.</p>
         <form method='post' enctype='multipart/form-data'>
             <div class='upload' id='uploadBox'>
                 <p id='statusText' style='margin-bottom:15px; font-weight:bold; color:#4b5563;'>📋 Puedes pulsar Ctrl + V para pegar una captura</p>
@@ -332,6 +338,21 @@ def upload():
         </form>
         </section>
         <script>
+        var promptText = `Actúa como un generador de capturas de pantalla digitales para un sistema OCR. Te adjunto una foto de una pregunta de examen/test tomada con el móvil o de mala calidad. Recrea exactamente el texto y el diseño en una imagen digital impecable siguiendo estas reglas:
+1. Fondo y texto: Fondo blanco puro (#FFFFFF) y texto en negro o gris oscuro, perfectamente nítido, horizontal y enfocado.
+2. Estructura: Pon el enunciado de la pregunta arriba y debajo las opciones alineadas verticalmente identificadas con a), b), c), d).
+3. Respuesta correcta: Identifica cuál es la respuesta correcta en la foto original y resalta toda la casilla de esa opción con un recuadro de color verde claro (tipo #DCFCE7) con borde verde (#22C55E) que ocupe más del 60% del ancho de la imagen.
+4. Limpieza total: Elimina reflejos, sombras, inclinación de perspectiva, moiré de monitor o cualquier marco o elemento externo. Muestra solo el recuadro limpio de la pregunta.`;
+
+        function copyPrompt() {
+            navigator.clipboard.writeText(promptText).then(function() {
+                var btn = document.getElementById('copyPromptBtn');
+                var orig = btn.innerHTML;
+                btn.innerHTML = '✅ ¡Copiado!';
+                setTimeout(function() { btn.innerHTML = orig; }, 2000);
+            });
+        }
+
         document.addEventListener('paste', function(e) {
             var items = (e.clipboardData || e.originalEvent.clipboardData).items;
             for (var i = 0; i < items.length; i++) {
