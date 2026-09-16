@@ -36,7 +36,7 @@ input[type=text]{width:100%;box-sizing:border-box;padding:12px;border:1px solid 
 
 def page(body: str, title="Mis preguntas", **ctx):
     user_name = ctx.pop("user_name", None)
-    template = """<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>""" + title + """</title><style>""" + CSS + """</style></head><body><main>
+    template = """<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>'><title>""" + title + """</title><style>""" + CSS + """</style></head><body><main>
     {% if session.get('user_id') %}<nav><a href='""" + url_for('index') + """'>Inicio</a><a href='""" + url_for('upload') + """'>Añadir</a><a href='""" + url_for('questions') + """'>Guardadas</a><a href='""" + url_for('users') + """'>Cambiar usuario</a></nav>{% endif %}
     {% with messages = get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class='flash {{cat}}'>{{msg}}</div>{% endfor %}{% endwith %}
     """ + body + """
