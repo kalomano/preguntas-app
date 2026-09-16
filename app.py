@@ -66,7 +66,6 @@ def init_db():
         )""")
         c.execute("ALTER TABLE questions ADD COLUMN IF NOT EXISTS user_id BIGINT")
 
-        # Preguntas antiguas: se conservan y se asignan a un usuario inicial.
         old_user = c.execute(
             "SELECT id FROM users WHERE name=%s LIMIT 1", ("Sin asignar",)
         ).fetchone()
@@ -321,8 +320,35 @@ def index():
 @app.route("/upload", methods=["GET", "POST"])
 def upload():
     if request.method == "GET":
-        body = """<section class='card'><h1>Añadir captura</h1><p>Sube una imagen como la que has enviado. La app lee la pregunta, las respuestas y usa el verde para detectar la correcta.</p>
-        <form method='post' enctype='multipart/form-data'><div class='upload'><input type='file' name='image' accept='image/png,image/jpeg,image/webp' required></div><button class='btn primary' type='submit'>Analizar y guardar</button></form></section>"""
+        body = """<section class='card'>
+        <h1>Añadir captura</h1>
+        <p>Sube una imagen o <strong>pega directamente del portapapeles (Ctrl + V)</strong>.</p>
+        <form method='post' enctype='multipart/form-data'>
+            <div class='upload' id='uploadBox'>
+                <p id='statusText' style='margin-bottom:15px; font-weight:bold; color:#4b5563;'>📋 Puedes pulsar Ctrl + V para pegar una captura</p>
+                <input type='file' id='imageInput' name='image' accept='image/png,image/jpeg,image/webp' required>
+            </div>
+            <button class='btn primary' type='submit'>Analizar y guardar</button>
+        </form>
+        </section>
+        <script>
+        document.addEventListener('paste', function(e) {
+            var items = (e.clipboardData || e.originalEvent.clipboardData).items;
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    var blob = items[i].getAsFile();
+                    var file = new File([blob], 'captura_portapapeles.png', { type: blob.type });
+                    var dt = new DataTransfer();
+                    dt.items.add(file);
+                    var input = document.getElementById('imageInput');
+                    input.files = dt.files;
+                    document.getElementById('statusText').innerHTML = '✅ ¡Imagen cargada desde el portapapeles!';
+                    document.getElementById('statusText').style.color = '#166534';
+                    break;
+                }
+            }
+        });
+        </script>"""
         return page(body)
 
     f = request.files.get("image")
