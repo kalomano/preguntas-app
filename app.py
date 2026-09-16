@@ -67,6 +67,14 @@ def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\u00a0", " ")).strip()
 
 
+def parse_options(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    raise TypeError(f"Formato inesperado para options_json: {type(value).__name__}")
+
+
 def ocr_lines(image):
     # No usamos DATAFRAME: no hace falta pandas.
     data = pytesseract.image_to_data(image, lang="spa+eng", config="--psm 11", output_type=pytesseract.Output.DICT)
@@ -278,7 +286,7 @@ def next_question():
         qid = int(row["id"])
 
     q = get_question(qid)
-    options = json.loads(q["options_json"])
+    options = parse_options(q["options_json"])
     answers = "".join(f"<label class='answer'><input type='radio' name='answer' value='{i}' required> <strong>{escape(o['letter'])})</strong> {escape(o['text'])}</label>" for i,o in enumerate(options))
     body = f"""<section class='card'><span class='badge'>{'Todas' if mode=='all' else 'Aleatoria'}</span><h1>{escape(q['question'])}</h1>
     <form method='post' action='{url_for('answer',qid=qid)}'><div class='answers'>{answers}</div><button class='btn primary' type='submit'>Responder</button></form></section>"""
@@ -295,7 +303,7 @@ def answer(qid):
     except Exception:
         flash("Selecciona una respuesta.", "error")
         return redirect(url_for("next_question"))
-    options = json.loads(q["options_json"])
+    options = parse_options(q["options_json"])
     correct = int(q["correct_index"])
     rows = []
     for i,o in enumerate(options):
@@ -335,7 +343,7 @@ def questions():
         return page("<section class='card'><h1>Guardadas</h1><p>No hay preguntas todavía.</p></section>")
     items=[]
     for q in rows:
-        opts=json.loads(q["options_json"]); ok=opts[int(q["correct_index"])]
+        opts=parse_options(q["options_json"]); ok=opts[int(q["correct_index"])]
         items.append(f"<article class='item'><h3>{escape(q['question'])}</h3><p>Correcta: <strong>{escape(ok['letter'])}) {escape(ok['text'])}</strong></p></article>")
     return page("<section class='card'><h1>Guardadas</h1>" + "".join(items) + "</section>")
 
