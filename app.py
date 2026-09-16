@@ -334,7 +334,7 @@ def upload():
                 <p id='statusText' style='margin-bottom:15px; font-weight:bold; color:#4b5563;'>📋 Puedes pulsar Ctrl + V para pegar una captura</p>
                 <input type='file' id='imageInput' name='image' accept='image/png,image/jpeg,image/webp' required>
             </div>
-            <button class='btn primary' type='submit'>Analizar y guardar</button>
+            <button class='btn primary' type='submit'>Analizar e Inspeccionar</button>
         </form>
         </section>
         <script>
@@ -395,6 +395,44 @@ def upload():
         except FileNotFoundError:
             pass
 
+    # PASO INTERMEDIO: Mostrar vista previa de confirmación antes de guardar en la BD
+    options_json_str = json.dumps(options, ensure_ascii=False)
+    answers_html = ""
+    for i, o in enumerate(options):
+        cls = "correct" if i == correct else ""
+        answers_html += f"<div class='answer {cls}'><strong>{escape(o['letter'])})</strong> {escape(o['text'])} {' 🟢 <em>(Detectada como correcta)</em>' if i == correct else ''}</div>"
+
+    body = f"""<section class='card'>
+    <span class='badge'>Paso intermedio: Confirmación</span>
+    <h1 style='margin-top:10px;'>Inspeccionar resultado del OCR</h1>
+    <p>Comprueba que la pregunta y la respuesta correcta detectada sean correctas antes de guardarla:</p>
+    <h2>{escape(question)}</h2>
+    <div class='answers'>{answers_html}</div>
+    
+    <form method='post' action='{url_for("confirm_save")}'>
+        <input type='hidden' name='question' value='{escape(question)}'>
+        <input type='hidden' name='options_json' value='{escape(options_json_str)}'>
+        <input type='hidden' name='correct_index' value='{correct}'>
+        <div class='actions'>
+            <button class='btn primary' type='submit'>✅ Confirmar y Guardar</button>
+            <a class='btn danger' href='{url_for("upload")}'>❌ Descartar y reintentar</a>
+        </div>
+    </form>
+    </section>"""
+    return page(body, "Confirmar pregunta")
+
+
+@app.post("/confirm-save")
+def confirm_save():
+    question = clean(request.form.get("question", ""))
+    options_json = request.form.get("options_json", "[]")
+    try:
+        correct = int(request.form.get("correct_index", "0"))
+        options = parse_options(options_json)
+    except Exception:
+        flash("Los datos transmitidos no son válidos.", "error")
+        return redirect(url_for("upload"))
+
     uid = current_user_id()
     with db() as c:
         if c.execute(
@@ -407,7 +445,7 @@ def upload():
             "INSERT INTO questions(question,options_json,correct_index,user_id) VALUES(%s,%s,%s,%s)",
             (question, json.dumps(options, ensure_ascii=False), correct, uid),
         )
-    flash(f"Guardada. Correcta: {options[correct]['letter']}) {options[correct]['text']}", "success")
+    flash(f"Guardada correctamente. Respuesta correcta: {options[correct]['letter']}) {options[correct]['text']}", "success")
     return redirect(url_for("index"))
 
 
@@ -496,6 +534,13 @@ def delete(qid):
         c.execute("DELETE FROM questions WHERE id=%s AND user_id=%s", (qid, uid))
     if session.get("mode") == "all":
         session["queue"] = [int(x) for x in session.get("queue", []) if int(x) != qid]
+    
+    # Redirigir de nuevo a la vista de preguntas guardadas si se eliminó desde allí
+    ref = request.referrer or ""
+    if "/questions" in ref:
+        flash("Pregunta eliminada correctamente.", "success")
+        return redirect(url_for("questions"))
+        
     return redirect(url_for("next_question"))
 
 
@@ -512,7 +557,13 @@ def questions():
     for q in rows:
         opts = parse_options(q["options_json"])
         ok = opts[int(q["correct_index"])]
-        items.append(f"<article class='item'><h3>{escape(q['question'])}</h3><p>Correcta: <strong>{escape(ok['letter'])}) {escape(ok['text'])}</strong></p></article>")
+        items.append(f"""<article class='item'>
+            <h3>{escape(q['question'])}</h3>
+            <p>Correcta: <strong>{escape(ok['letter'])}) {escape(ok['text'])}</strong></p>
+            <form method='post' action='{url_for('delete', qid=q['id'])}' onsubmit='return confirm("¿Eliminar definitivamente esta pregunta?")'>
+                <button class='btn danger' type='submit' style='padding:6px 12px;font-size:14px;margin-top:8px;'>🗑️ Eliminar</button>
+            </form>
+        </article>""")
     return page("<section class='card'><h1>Guardadas</h1>" + "".join(items) + "</section>")
 
 
