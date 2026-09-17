@@ -30,6 +30,7 @@ h1,h2{line-height:1.3}p{font-size:17px;line-height:1.55}.big{font-size:42px;font
 .upload{border:2px dashed #cbd5e1;border-radius:14px;padding:30px;text-align:center;margin:20px 0}.answers{display:grid;gap:12px;margin:20px 0}.answer{display:block;border:1px solid #d1d5db;border-radius:12px;padding:15px;background:white;cursor:pointer}.answer.correct{background:#dcfce7;border-color:#22c55e}.answer.selected{background:#fee2e2;border-color:#ef4444}
 .badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:5px 10px;font-weight:800;font-size:13px}.result{font-size:28px;font-weight:900}.ok{color:#15803d}.bad{color:#b91c1c}.item{border-top:1px solid #e5e7eb;padding:18px 0}.item:first-child{border-top:0}.muted{color:#6b7280}
 input[type=text]{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d1d5db;border-radius:10px;font-size:17px}
+
 @media(max-width:600px){.card{padding:20px}.btn{width:100%;text-align:center}}
 """
 
@@ -38,8 +39,11 @@ def page(body: str, title="Mis preguntas", **ctx):
     user_name = ctx.pop("user_name", None)
     template = """<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>'><title>""" + title + """</title><style>""" + CSS + """</style></head><body><main>
     {% if session.get('user_id') %}<nav><a href='""" + url_for('index') + """'>Inicio</a><a href='""" + url_for('upload') + """'>Añadir</a><a href='""" + url_for('questions') + """'>Guardadas</a><a href='""" + url_for('users') + """'>Cambiar usuario</a></nav>{% endif %}
+
     {% with messages = get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class='flash {{cat}}'>{{msg}}</div>{% endfor %}{% endwith %}
+
     """ + body + """
+
     </main></body></html>"""
     return render_template_string(template, **ctx)
 
@@ -65,7 +69,6 @@ def init_db():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
         c.execute("ALTER TABLE questions ADD COLUMN IF NOT EXISTS user_id BIGINT")
-
         old_user = c.execute(
             "SELECT id FROM users WHERE name=%s LIMIT 1", ("Sin asignar",)
         ).fetchone()
@@ -114,7 +117,12 @@ def clean(s: str) -> str:
 
 
 def ocr_lines(image):
-    data = pytesseract.image_to_data(image, lang="spa+eng", config="--psm 11", output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(
+        image,
+        lang="spa+eng",
+        config="--psm 11",
+        output_type=pytesseract.Output.DICT,
+    )
     groups = {}
     total = len(data.get("text", []))
     for i in range(total):
@@ -127,40 +135,98 @@ def ocr_lines(image):
         text = clean(str(data["text"][i]))
         if not text:
             continue
-        key = (int(data["block_num"][i]), int(data["par_num"][i]), int(data["line_num"][i]))
-        groups.setdefault(key, []).append({
-            "text": text,
-            "left": int(data["left"][i]),
-            "top": int(data["top"][i]),
-            "height": int(data["height"][i]),
-        })
+        key = (
+            int(data["block_num"][i]),
+            int(data["par_num"][i]),
+            int(data["line_num"][i]),
+        )
+        groups.setdefault(key, []).append(
+            {
+                "text": text,
+                "left": int(data["left"][i]),
+                "top": int(data["top"][i]),
+                "height": int(data["height"][i]),
+            }
+        )
     lines = []
     for words in groups.values():
         words = sorted(words, key=lambda x: x["left"])
-        lines.append({
-            "text": clean(" ".join(x["text"] for x in words)),
-            "top": min(x["top"] for x in words),
-            "bottom": max(x["top"] + x["height"] for x in words),
-        })
+        lines.append(
+            {
+                "text": clean(" ".join(x["text"] for x in words)),
+                "top": min(x["top"] for x in words),
+                "bottom": max(x["top"] + x["height"] for x in words),
+            }
+        )
     return sorted(lines, key=lambda x: (x["top"], x["text"]))
 
 
 def parse_capture(path: str):
+    """Extrae pregunta, opciones y la opción marcada en verde.
+
+    Es especialmente tolerante con errores habituales de OCR en capturas:
+    - Tesseract puede leer el borde vertical de una tarjeta como '|', de modo que
+      puede devolver '| b) Texto...' en lugar de 'b) Texto...'.
+    - Dos opciones pueden quedar en una sola línea OCR, por ejemplo
+      'a) Texto A | b) Texto B'.
+    - Puede aparecer ruido antes de la letra de la opción.
+    """
     image = cv2.imread(path)
     if image is None:
         raise ValueError("No se pudo abrir la imagen.")
+
     lines = ocr_lines(image)
+
+    # Detecta etiquetas a), b), c), d) incluso si tienen ruido OCR delante.
+    # El lookbehind evita considerar letras de palabras como "a" o "b".
+    marker = re.compile(r"(?<![A-Za-z0-9])([a-dA-D])\s*[)\.\-:]\s*")
+
+    # Convierte líneas OCR como:
+    #   '| b) respuesta B'
+    # o:
+    #   'a) respuesta A | b) respuesta B'
+    # en líneas separadas y normalizadas.
+    expanded_lines = []
+    for line in lines:
+        text = line["text"]
+        matches = list(marker.finditer(text))
+
+        # Una etiqueta de respuesta es válida si está al principio, permitiendo
+        # hasta 8 caracteres de ruido OCR delante (|, [, ], etc.).
+        if not matches or matches[0].start() > 8:
+            expanded_lines.append(line)
+            continue
+
+        for n, match in enumerate(matches):
+            end = matches[n + 1].start() if n + 1 < len(matches) else len(text)
+            answer_text = text[match.end():end].strip(" |[]{}<>\t")
+            normalized = f"{match.group(1).lower()}) {answer_text}".strip()
+            expanded_lines.append(
+                {
+                    "text": normalized,
+                    "top": line["top"],
+                    "bottom": line["bottom"],
+                }
+            )
+
+    # Ahora cada línea de respuesta debe empezar por a), b), c) o d).
     pat = re.compile(r"^([a-dA-D])\s*[)\.\-:]\s*(.*)$")
     starts = []
-    for i, line in enumerate(lines):
+    seen_letters = set()
+    for i, line in enumerate(expanded_lines):
         m = pat.match(line["text"])
         if m:
-            starts.append((i, m.group(1).lower(), m.group(2).strip(), line))
+            letter = m.group(1).lower()
+            if letter in seen_letters:
+                continue
+            seen_letters.add(letter)
+            starts.append((i, letter, m.group(2).strip(), line))
+
     if len(starts) < 2:
         raise ValueError("No he detectado las respuestas a), b), c), etc.")
 
     q_parts = []
-    for line in lines[:starts[0][0]]:
+    for line in expanded_lines[:starts[0][0]]:
         t = re.sub(r"^\d+\.\s*", "", line["text"])
         if t:
             q_parts.append(t)
@@ -170,15 +236,23 @@ def parse_capture(path: str):
 
     options = []
     for n, (idx, letter, first, line) in enumerate(starts):
-        end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
+        end = starts[n + 1][0] if n + 1 < len(starts) else len(expanded_lines)
         top, bottom = line["top"], line["bottom"]
         pieces = [first] if first else []
-        for extra in lines[idx + 1:end]:
+        for extra in expanded_lines[idx + 1 : end]:
             pieces.append(extra["text"])
             top = min(top, extra["top"])
             bottom = max(bottom, extra["bottom"])
-        options.append({"letter": letter, "text": clean(" ".join(pieces)), "top": top, "bottom": bottom})
+        options.append(
+            {
+                "letter": letter,
+                "text": clean(" ".join(pieces)),
+                "top": top,
+                "bottom": bottom,
+            }
+        )
 
+    # Detecta el gran rectángulo verde de la respuesta correcta.
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([35, 20, 140]), np.array([95, 255, 255]))
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask)
@@ -187,13 +261,24 @@ def parse_capture(path: str):
     for i in range(1, n_labels):
         x, y, ww, hh, area = stats[i]
         if area > h * w * 0.02 and ww > w * 0.5 and hh > 25:
-            greens.append((int(y), int(y + hh)))
+            greens.append((int(y), int(y + hh), int(area)))
     if not greens:
         raise ValueError("No he encontrado la respuesta correcta marcada en verde.")
-    gy1, gy2 = max(greens, key=lambda x: x[1] - x[0])
-    overlaps = [max(0, min(o["bottom"], gy2) - max(o["top"], gy1)) for o in options]
+
+    gy1, gy2, _ = max(greens, key=lambda x: x[2])
+    overlaps = [
+        max(0, min(o["bottom"], gy2) - max(o["top"], gy1)) for o in options
+    ]
+    if max(overlaps) <= 0:
+        raise ValueError("He encontrado el verde, pero no coincide con ninguna respuesta detectada.")
+
     correct = overlaps.index(max(overlaps))
-    return question, [{"letter": o["letter"], "text": o["text"]} for o in options], correct
+
+    return (
+        question,
+        [{"letter": o["letter"], "text": o["text"]} for o in options],
+        correct,
+    )
 
 
 def parse_options(value):
@@ -209,9 +294,12 @@ def all_ids():
     if uid is None:
         return []
     with db() as c:
-        ids = [int(r["id"]) for r in c.execute(
-            "SELECT id FROM questions WHERE user_id=%s", (uid,)
-        ).fetchall()]
+        ids = [
+            int(r["id"])
+            for r in c.execute(
+                "SELECT id FROM questions WHERE user_id=%s", (uid,)
+            ).fetchall()
+        ]
     random.shuffle(ids)
     return ids
 
@@ -228,7 +316,9 @@ def get_question(qid):
 
 def get_users():
     with db() as c:
-        return c.execute("SELECT id,name FROM users ORDER BY LOWER(name), id").fetchall()
+        return c.execute(
+            "SELECT id,name FROM users ORDER BY LOWER(name), id"
+        ).fetchall()
 
 
 @app.before_request
@@ -286,13 +376,17 @@ def create_user():
         flash("El nombre es demasiado largo.", "error")
         return redirect(url_for("users"))
     with db() as c:
-        existing = c.execute("SELECT id,name FROM users WHERE LOWER(name)=LOWER(%s) LIMIT 1", (name,)).fetchone()
+        existing = c.execute(
+            "SELECT id,name FROM users WHERE LOWER(name)=LOWER(%s) LIMIT 1", (name,)
+        ).fetchone()
         if existing:
             session.clear()
             session["user_id"] = existing["id"]
             flash("Ese usuario ya existía. Has entrado con él.", "success")
             return redirect(url_for("index"))
-        row = c.execute("INSERT INTO users(name) VALUES(%s) RETURNING id", (name,)).fetchone()
+        row = c.execute(
+            "INSERT INTO users(name) VALUES(%s) RETURNING id", (name,)
+        ).fetchone()
     session.clear()
     session["user_id"] = row["id"]
     flash(f"Usuario {name} creado.", "success")
@@ -310,7 +404,9 @@ def index():
     uid = current_user_id()
     user_name = current_user_name()
     with db() as c:
-        count = c.execute("SELECT COUNT(*) AS n FROM questions WHERE user_id=%s", (uid,)).fetchone()["n"]
+        count = c.execute(
+            "SELECT COUNT(*) AS n FROM questions WHERE user_id=%s", (uid,)
+        ).fetchone()["n"]
     body = f"""<section class='card'><span class='badge'>Usuario: {escape(user_name)}</span><h1>Mis preguntas</h1><p class='big'>{count} guardadas</p><div class='actions'>
     <a class='btn primary' href='{url_for('upload')}'>Añadir captura</a><a class='btn' href='{url_for('practice',mode='random')}'>Pregunta aleatoria</a><a class='btn' href='{url_for('practice',mode='all')}'>Hacerlas todas</a></div></section>
     <p class='muted'>Tus preguntas son independientes de las de los demás usuarios.</p>"""
@@ -339,11 +435,14 @@ def upload():
         </section>
         <script>
         var promptText = `Actúa como un generador de capturas de pantalla digitales para un sistema OCR. Te adjunto una foto de una pregunta de examen/test tomada con el móvil o de mala calidad. Recrea exactamente el texto y el diseño en una imagen digital impecable siguiendo estas reglas:
-1. Fondo y texto: Fondo blanco puro (#FFFFFF) y texto en negro o gris oscuro, perfectamente nítido, horizontal y enfocado.
-2. Estructura: Pon el enunciado de la pregunta arriba y debajo las opciones alineadas verticalmente identificadas con a), b), c), d).
-3. Respuesta correcta: Identifica cuál es la respuesta correcta en la foto original y resalta toda la casilla de esa opción con un recuadro de color verde claro (tipo #DCFCE7) con borde verde (#22C55E) que ocupe más del 60% del ancho de la imagen.
-4. Limpieza total: Elimina reflejos, sombras, inclinación de perspectiva, moiré de monitor o cualquier marco o elemento externo. Muestra solo el recuadro limpio de la pregunta.`;
 
+1. Fondo y texto: Fondo blanco puro (#FFFFFF) y texto en negro o gris oscuro, perfectamente nítido, horizontal y enfocado.
+
+2. Estructura: Pon el enunciado de la pregunta arriba y debajo las opciones alineadas verticalmente identificadas con a), b), c), d).
+
+3. Respuesta correcta: Identifica cuál es la respuesta correcta en la foto original y resalta toda la casilla de esa opción con un recuadro de color verde claro (tipo #DCFCE7) con borde verde (#22C55E) que ocupe más del 60% del ancho de la imagen.
+
+4. Limpieza total: Elimina reflejos, sombras, inclinación de perspectiva, moiré de monitor o cualquier marco o elemento externo. Muestra solo el recuadro limpio de la pregunta.`;
         function copyPrompt() {
             navigator.clipboard.writeText(promptText).then(function() {
                 var btn = document.getElementById('copyPromptBtn');
@@ -352,7 +451,6 @@ def upload():
                 setTimeout(function() { btn.innerHTML = orig; }, 2000);
             });
         }
-
         document.addEventListener('paste', function(e) {
             var items = (e.clipboardData || e.originalEvent.clipboardData).items;
             for (var i = 0; i < items.length; i++) {
@@ -380,7 +478,6 @@ def upload():
     if ext not in {"png", "jpg", "jpeg", "webp"}:
         flash("Formato no válido. Usa PNG, JPG, JPEG o WEBP.", "error")
         return redirect(url_for("upload"))
-
     fd, temp_name = tempfile.mkstemp(suffix="." + ext)
     os.close(fd)
     try:
@@ -395,20 +492,21 @@ def upload():
         except FileNotFoundError:
             pass
 
-    # PASO INTERMEDIO: Mostrar vista previa de confirmación antes de guardar en la BD
     options_json_str = json.dumps(options, ensure_ascii=False)
     answers_html = ""
     for i, o in enumerate(options):
         cls = "correct" if i == correct else ""
-        answers_html += f"<div class='answer {cls}'><strong>{escape(o['letter'])})</strong> {escape(o['text'])} {' 🟢 <em>(Detectada como correcta)</em>' if i == correct else ''}</div>"
-
+        answers_html += (
+            f"<div class='answer {cls}'><strong>{escape(o['letter'])})</strong> "
+            f"{escape(o['text'])} "
+            f"{' 🟢 <em>(Detectada como correcta)</em>' if i == correct else ''}</div>"
+        )
     body = f"""<section class='card'>
     <span class='badge'>Paso intermedio: Confirmación</span>
     <h1 style='margin-top:10px;'>Inspeccionar resultado del OCR</h1>
     <p>Comprueba que la pregunta y la respuesta correcta detectada sean correctas antes de guardarla:</p>
     <h2>{escape(question)}</h2>
     <div class='answers'>{answers_html}</div>
-    
     <form method='post' action='{url_for("confirm_save")}'>
         <input type='hidden' name='question' value='{escape(question)}'>
         <input type='hidden' name='options_json' value='{escape(options_json_str)}'>
@@ -432,7 +530,6 @@ def confirm_save():
     except Exception:
         flash("Los datos transmitidos no son válidos.", "error")
         return redirect(url_for("upload"))
-
     uid = current_user_id()
     with db() as c:
         if c.execute(
@@ -445,7 +542,10 @@ def confirm_save():
             "INSERT INTO questions(question,options_json,correct_index,user_id) VALUES(%s,%s,%s,%s)",
             (question, json.dumps(options, ensure_ascii=False), correct, uid),
         )
-    flash(f"Guardada correctamente. Respuesta correcta: {options[correct]['letter']}) {options[correct]['text']}", "success")
+    flash(
+        f"Guardada correctamente. Respuesta correcta: {options[correct]['letter']}) {options[correct]['text']}",
+        "success",
+    )
     return redirect(url_for("index"))
 
 
@@ -470,7 +570,11 @@ def next_question():
         queue = [x for x in queue if get_question(x) is not None]
         session["queue"] = queue
         if not queue:
-            return page("<section class='card'><h1>Has terminado</h1><p>No quedan preguntas en esta tanda.</p><a class='btn primary' href='" + url_for('practice', mode='all') + "'>Repetir todas</a></section>")
+            return page(
+                "<section class='card'><h1>Has terminado</h1><p>No quedan preguntas en esta tanda.</p><a class='btn primary' href='"
+                + url_for("practice", mode="all")
+                + "'>Repetir todas</a></section>"
+            )
         qid = queue[0]
     else:
         uid = current_user_id()
@@ -483,10 +587,12 @@ def next_question():
             flash("No hay preguntas guardadas todavía.", "error")
             return redirect(url_for("index"))
         qid = int(row["id"])
-
     q = get_question(qid)
     options = parse_options(q["options_json"])
-    answers = "".join(f"<label class='answer'><input type='radio' name='answer' value='{i}' required> <strong>{escape(o['letter'])})</strong> {escape(o['text'])}</label>" for i,o in enumerate(options))
+    answers = "".join(
+        f"<label class='answer'><input type='radio' name='answer' value='{i}' required> <strong>{escape(o['letter'])})</strong> {escape(o['text'])}</label>"
+        for i, o in enumerate(options)
+    )
     body = f"""<section class='card'><span class='badge'>{'Todas' if mode=='all' else 'Aleatoria'}</span><h1>{escape(q['question'])}</h1>
     <form method='post' action='{url_for('answer',qid=qid)}'><div class='answers'>{answers}</div><button class='btn primary' type='submit'>Responder</button></form></section>"""
     return page(body)
@@ -503,11 +609,16 @@ def answer(qid):
         flash("Selecciona una respuesta.", "error")
         return redirect(url_for("next_question"))
     options = parse_options(q["options_json"])
+    if selected < 0 or selected >= len(options):
+        flash("Respuesta no válida.", "error")
+        return redirect(url_for("next_question"))
     correct = int(q["correct_index"])
     rows = []
-    for i,o in enumerate(options):
+    for i, o in enumerate(options):
         cls = "correct" if i == correct else ("selected" if i == selected else "")
-        rows.append(f"<div class='answer {cls}'><strong>{escape(o['letter'])})</strong> {escape(o['text'])}</div>")
+        rows.append(
+            f"<div class='answer {cls}'><strong>{escape(o['letter'])})</strong> {escape(o['text'])}</div>"
+        )
     estado = "Correcta" if selected == correct else "Incorrecta"
     estado_cls = "ok" if selected == correct else "bad"
     body = f"""<section class='card'><div class='result {estado_cls}'>{estado}</div><h2>{escape(q['question'])}</h2><div class='answers'>{''.join(rows)}</div>
@@ -523,7 +634,9 @@ def keep(qid):
     if not get_question(qid):
         return redirect(url_for("index"))
     if session.get("mode") == "all":
-        session["queue"] = [int(x) for x in session.get("queue", []) if int(x) != qid]
+        session["queue"] = [
+            int(x) for x in session.get("queue", []) if int(x) != qid
+        ]
     return redirect(url_for("next_question"))
 
 
@@ -533,14 +646,13 @@ def delete(qid):
     with db() as c:
         c.execute("DELETE FROM questions WHERE id=%s AND user_id=%s", (qid, uid))
     if session.get("mode") == "all":
-        session["queue"] = [int(x) for x in session.get("queue", []) if int(x) != qid]
-    
-    # Redirigir de nuevo a la vista de preguntas guardadas si se eliminó desde allí
+        session["queue"] = [
+            int(x) for x in session.get("queue", []) if int(x) != qid
+        ]
     ref = request.referrer or ""
     if "/questions" in ref:
         flash("Pregunta eliminada correctamente.", "success")
         return redirect(url_for("questions"))
-        
     return redirect(url_for("next_question"))
 
 
@@ -552,18 +664,22 @@ def questions():
             "SELECT * FROM questions WHERE user_id=%s ORDER BY id DESC", (uid,)
         ).fetchall()
     if not rows:
-        return page("<section class='card'><h1>Guardadas</h1><p>No hay preguntas todavía para este usuario.</p></section>")
+        return page(
+            "<section class='card'><h1>Guardadas</h1><p>No hay preguntas todavía para este usuario.</p></section>"
+        )
     items = []
     for q in rows:
         opts = parse_options(q["options_json"])
         ok = opts[int(q["correct_index"])]
-        items.append(f"""<article class='item'>
+        items.append(
+            f"""<article class='item'>
             <h3>{escape(q['question'])}</h3>
             <p>Correcta: <strong>{escape(ok['letter'])}) {escape(ok['text'])}</strong></p>
             <form method='post' action='{url_for('delete', qid=q['id'])}' onsubmit='return confirm("¿Eliminar definitivamente esta pregunta?")'>
                 <button class='btn danger' type='submit' style='padding:6px 12px;font-size:14px;margin-top:8px;'>🗑️ Eliminar</button>
             </form>
-        </article>""")
+        </article>"""
+        )
     return page("<section class='card'><h1>Guardadas</h1>" + "".join(items) + "</section>")
 
 
