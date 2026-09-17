@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import random
@@ -18,6 +19,22 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "CAMBIA-ESTA-CLAVE")
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+# Render puede tener muy poca RAM. Tesseract usa OpenMP y, por defecto,
+# puede abrir varios hilos de trabajo para una sola imagen. Limitarlo a un
+# hilo reduce muchísimo el pico de memoria y evita que Render mate el worker.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+# OpenCV tampoco necesita varios hilos para estas capturas pequeñas.
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
+
+OCR_MAX_WIDTH = 1200
+OCR_TIMEOUT = 10
+OCR_LANG = os.environ.get("OCR_LANG", "spa+eng")
 
 CSS = """
 body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f5f7fb;color:#111827;margin:0}
@@ -120,13 +137,63 @@ def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\u00a0", " ")).strip()
 
 
-def ocr_lines(image):
-    data = pytesseract.image_to_data(
-        image,
-        lang="spa+eng",
-        config="--psm 11",
-        output_type=pytesseract.Output.DICT,
-    )
+def ocr_lines(image, green_mask=None, psm=6):
+    """Ejecuta Tesseract usando poca RAM y devuelve líneas con coordenadas.
+
+    Medidas importantes para Render:
+    - limita el ancho de la imagen antes del OCR;
+    - convierte a escala de grises;
+    - blanquea el fondo verde para que no perjudique el OCR;
+    - limita Tesseract a un hilo mediante OpenMP;
+    - impone un timeout para que una imagen problemática no bloquee Gunicorn.
+
+    Las coordenadas se devuelven escaladas de nuevo al tamaño original, por lo
+    que el resto del algoritmo sigue trabajando sobre la imagen original.
+    """
+    if image is None or image.size == 0:
+        raise ValueError("Imagen vacía.")
+
+    original_h, original_w = image.shape[:2]
+
+    # Trabajamos sobre una copia pequeña y monocroma.
+    work = image
+    if green_mask is not None:
+        work = image.copy()
+        work[green_mask > 0] = (255, 255, 255)
+
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+
+    scale = min(1.0, OCR_MAX_WIDTH / float(original_w))
+    if scale < 1.0:
+        ocr_w = max(1, int(round(original_w * scale)))
+        ocr_h = max(1, int(round(original_h * scale)))
+        gray = cv2.resize(gray, (ocr_w, ocr_h), interpolation=cv2.INTER_AREA)
+    else:
+        ocr_w, ocr_h = original_w, original_h
+
+    try:
+        data = pytesseract.image_to_data(
+            gray,
+            lang=OCR_LANG,
+            config=f"--oem 1 --psm {psm}",
+            output_type=pytesseract.Output.DICT,
+            timeout=OCR_TIMEOUT,
+        )
+    except RuntimeError as exc:
+        # pytesseract lanza RuntimeError cuando alcanza el timeout. Convertimos
+        # esto en un error claro y controlado en vez de dejar que Gunicorn mate
+        # el worker por esperar demasiado.
+        raise ValueError(
+            "Tesseract tardó demasiado. La imagen se ha limitado para usar menos memoria."
+        ) from exc
+    finally:
+        del gray
+        del work
+        gc.collect()
+
+    sx = original_w / float(ocr_w)
+    sy = original_h / float(ocr_h)
+
     groups = {}
     total = len(data.get("text", []))
     for i in range(total):
@@ -139,19 +206,24 @@ def ocr_lines(image):
         text = clean(str(data["text"][i]))
         if not text:
             continue
+
         key = (
             int(data["block_num"][i]),
             int(data["par_num"][i]),
             int(data["line_num"][i]),
         )
+        top = int(round(int(data["top"][i]) * sy))
+        left = int(round(int(data["left"][i]) * sx))
+        height = max(1, int(round(int(data["height"][i]) * sy)))
         groups.setdefault(key, []).append(
             {
                 "text": text,
-                "left": int(data["left"][i]),
-                "top": int(data["top"][i]),
-                "height": int(data["height"][i]),
+                "left": left,
+                "top": top,
+                "height": height,
             }
         )
+
     lines = []
     for words in groups.values():
         words = sorted(words, key=lambda x: x["left"])
@@ -179,7 +251,19 @@ def parse_capture(path: str):
     if image is None:
         raise ValueError("No se pudo abrir la imagen.")
 
-    lines = ocr_lines(image)
+    # Detectamos el verde una sola vez y lo reutilizamos para: 
+    # 1) quitarlo del OCR (texto negro sobre blanco), y
+    # 2) localizar la respuesta correcta.
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    green_mask = cv2.inRange(hsv, np.array([35, 20, 140]), np.array([95, 255, 255]))
+
+    # PSM 6 es bastante más ligero para este tipo de captura. Solo probamos
+    # PSM 11 si no aparecen suficientes etiquetas de respuesta.
+    lines = ocr_lines(image, green_mask=green_mask, psm=6)
+    marker_probe = re.compile(r"(?<![A-Za-z0-9])([a-dA-D])\s*[)\.\-:]\s*")
+    marker_count = sum(bool(marker_probe.search(line["text"])) for line in lines)
+    if marker_count < 2:
+        lines = ocr_lines(image, green_mask=green_mask, psm=11)
 
     # Detecta etiquetas a), b), c), d) incluso si tienen ruido OCR delante.
     # El lookbehind evita considerar letras de palabras como "a" o "b".
@@ -257,9 +341,7 @@ def parse_capture(path: str):
         )
 
     # Detecta el gran rectángulo verde de la respuesta correcta.
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array([35, 20, 140]), np.array([95, 255, 255]))
-    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(green_mask)
     greens = []
     h, w = image.shape[:2]
     for i in range(1, n_labels):
@@ -522,6 +604,7 @@ def upload():
         f.save(temp_name)
         question, options, correct = parse_capture(temp_name)
     except Exception as e:
+        print(f"Error analizando imagen: {type(e).__name__}: {e}", flush=True)
         flash(f"No pude analizar la imagen: {e}", "error")
         return redirect(url_for("upload"))
     finally:
