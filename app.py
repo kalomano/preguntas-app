@@ -480,14 +480,23 @@ def _ocr_needs_retry(text):
 
 
 def ocr_option_card(image, rect):
-    """OCR robusto de una única tarjeta, manteniendo bajo el consumo de RAM."""
+    """OCR robusto de una única tarjeta, optimizado para respuestas largas.
+
+    PSM 7 (una sola línea) era el origen de varios fallos: cuando una
+    respuesta era larga o tenía más de una línea, Tesseract podía saltarse
+    una parte importante del comienzo y devolver algo como "O para...".
+
+    Por eso la pasada principal usa PSM 6 (bloque uniforme de texto), que
+    conserva mucho mejor frases largas y respuestas que envuelven línea.
+    Solo hacemos una segunda pasada PSM 11 si la primera lectura parece
+    claramente sospechosa. Así mantenemos bajo el consumo de RAM de Render.
+    """
     x, y, w, h = rect
     ih, iw = image.shape[:2]
 
-    # IMPORTANTE: no usamos el 4.5% anterior. En tarjetas muy anchas eso
-    # recortaba la primera palabra/primera letra (por ejemplo 'Los' -> 'os').
-    # Un margen fijo pequeño elimina el borde sin comerse el texto.
-    pad_x = min(18, max(6, int(round(w * 0.012))))
+    # Margen pequeño: suficiente para quitar el borde de la tarjeta sin
+    # comernos la primera letra/palabra.
+    pad_x = min(18, max(5, int(round(w * 0.008))))
     pad_y = min(10, max(4, int(round(h * 0.10))))
     x1 = max(0, x + pad_x)
     x2 = min(iw, x + w - pad_x)
@@ -500,42 +509,43 @@ def ocr_option_card(image, rect):
     crop = image[y1:y2, x1:x2]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    # Primera pasada: escala de grises. Suele conservar mejor números,
-    # tildes y símbolos que un umbral binario agresivo.
-    work, _ = _limit_ocr_size(gray, 1400)
     try:
-        best = _ocr_text_variant(work, "--oem 1 --psm 7")
+        # PSM 6 es intencionadamente la primera opción. Para este tipo de
+        # tarjeta funciona tanto si hay una línea como si el texto se parte
+        # en dos o más líneas.
+        work, _ = _limit_ocr_size(gray, 1400)
+        best = _ocr_text_variant(
+            work,
+            "--oem 1 --psm 6 -c preserve_interword_spaces=1",
+        )
 
-        # Segunda pasada solo si la primera da señales claras de error.
-        # Se reescala únicamente este pequeño recorte, así que el coste de
-        # memoria sigue siendo muy bajo incluso en Render gratuito.
+        # Si PSM 6 no da una lectura fiable, usamos PSM 11 como rescate.
+        # No hacemos PSM 7: precisamente es el modo que estaba perdiendo
+        # comienzos de frases largas.
         if _ocr_needs_retry(best):
-            up = cv2.resize(
+            retry = _ocr_text_variant(
                 work,
-                None,
-                fx=1.5,
-                fy=1.5,
-                interpolation=cv2.INTER_CUBIC,
+                "--oem 1 --psm 11 -c preserve_interword_spaces=1",
             )
-            # Un segundo modo permite recuperar caracteres finos y números
-            # que se pierden con psm 7 en algunas fuentes.
-            retry = _ocr_text_variant(up, "--oem 1 --psm 6")
-            if len(retry) > len(best) or not best:
+            if retry and (not best or len(retry) >= max(3, int(len(best) * 0.75))):
                 best = retry
-            del up
             gc.collect()
 
-        # Solo como último recurso hacemos OTSU, y únicamente si aún hay
-        # caracteres sospechosos. No se ejecuta en condiciones normales.
+        # Una última pasada binaria solo cuando ambas lecturas son malas.
+        # Se hace sobre la imagen ya reducida, por lo que el pico de memoria
+        # sigue siendo pequeño.
         if _ocr_needs_retry(best):
             bw = _preprocess_ocr(work)
-            retry2 = _ocr_text_variant(bw, "--oem 1 --psm 7")
-            if len(retry2) > len(best) or not best:
+            retry2 = _ocr_text_variant(
+                bw,
+                "--oem 1 --psm 6 -c preserve_interword_spaces=1",
+            )
+            if retry2 and (not best or len(retry2) > len(best)):
                 best = retry2
             del bw
             gc.collect()
 
-        return best
+        return clean(best)
     finally:
         del gray, work, crop
         gc.collect()
