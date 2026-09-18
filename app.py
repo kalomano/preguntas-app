@@ -152,12 +152,16 @@ def _limit_ocr_size(image, max_width=1000):
 
 
 def _preprocess_ocr(image):
-    """Convierte a una imagen muy barata para Tesseract."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    """Convierte a blanco/negro barato; admite BGR o escala de grises."""
+    if image.ndim == 2:
+        gray = image
+    else:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     # OTSU funciona especialmente bien con texto negro sobre tarjetas blancas,
     # verdes o rojas claras y evita mantener grandes máscaras en memoria.
     _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    del gray
+    if gray is not image:
+        del gray
     return bw
 
 
@@ -423,23 +427,68 @@ def detect_answer_cards(image):
     return candidates
 
 def _normalize_option_text(text):
-    """Quita una etiqueta OCR errónea; la letra real la asignamos por posición."""
+    """Limpia ruido de OCR sin alterar el contenido de la respuesta."""
     text = clean(text)
-    # Quitamos la etiqueta solo al principio. No confiamos en ella para decidir
-    # si es a/b/c/d porque precisamente Tesseract puede confundir esas letras.
-    text = re.sub(r"^(?:[a-dA-D0-9€¢©@*|IlT])?\s*[)\].}:.,-]\s*", "", text)
-    text = re.sub(r"^[|IlT]\s*[)\].}:.,-]\s*", "", text)
+
+    # Quitamos solamente una posible etiqueta inicial. La letra real de la
+    # opción se asigna por posición (a/b/c/d), no por OCR.
+    text = re.sub(r"^(?:[a-dA-D0-9€¢©@*|IlT])\s*[)\].}:.,-]\s*", "", text)
+
+    # Ruido muy habitual cuando Tesseract ve el borde de una tarjeta.
+    text = re.sub(r"^[|IlT]\s+", "", text)
+
+    # Algunas capturas contienen unidades con superíndice. Tesseract suele
+    # devolver 'm2' o 'm?' porque el superíndice ² es pequeño; normalizamos
+    # esas dos lecturas únicamente cuando aparecen pegadas a la unidad m.
+    text = re.sub(r"(?i)\bm\s*2\b", "m²", text)
+    text = re.sub(r"(?i)\bm\s*\?", "m²", text)
+
+    # Errores de OCR muy concretos que aparecen en números cuando la fuente
+    # es grande/antialiasada. Solo los corregimos cuando el símbolo '$' está
+    # pegado al cero, una lectura típica de '50'.
+    text = re.sub(r"(?<!\w)\$0\b", "50", text)
+    text = re.sub(r"(?<!\w)S0\b", "50", text)
+
+    # Corrección muy conservadora de un error que Tesseract puede producir al
+    # reconocer la 'n' final de esta palabra frecuente en los tests.
+    text = re.sub(r"\bevacuaciór\b", "evacuación", text, flags=re.I)
+
+    # Elimina símbolos sueltos que Tesseract puede insertar en los bordes.
+    text = re.sub(r"^[~`^]+", "", text)
+    text = re.sub(r"[~`^]+$", "", text)
     return clean(text)
 
 
+def _ocr_text_variant(work, config):
+    """Ejecuta una pasada OCR pequeña y devuelve texto limpio."""
+    raw = _run_tesseract(work, config, output_dict=False)
+    return _normalize_option_text(raw)
+
+
+def _ocr_needs_retry(text):
+    """Detecta lecturas sospechosas que merecen una segunda pasada."""
+    if not text or len(text) < 3:
+        return True
+    suspicious = sum(text.count(ch) for ch in "?$|~`^@")
+    if suspicious:
+        return True
+    # Una opción real suele contener letras; una salida formada solo por
+    # números/símbolos es muy probablemente un fallo de OCR.
+    if not re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", text):
+        return True
+    return False
+
+
 def ocr_option_card(image, rect):
-    """OCR de una única tarjeta de respuesta, con consumo de memoria bajo."""
+    """OCR robusto de una única tarjeta, manteniendo bajo el consumo de RAM."""
     x, y, w, h = rect
     ih, iw = image.shape[:2]
 
-    # Dejamos el borde fuera del OCR para que no interfiera como caracteres.
-    pad_x = max(24, int(round(w * 0.045)))
-    pad_y = max(8, int(round(h * 0.14)))
+    # IMPORTANTE: no usamos el 4.5% anterior. En tarjetas muy anchas eso
+    # recortaba la primera palabra/primera letra (por ejemplo 'Los' -> 'os').
+    # Un margen fijo pequeño elimina el borde sin comerse el texto.
+    pad_x = min(18, max(6, int(round(w * 0.012))))
+    pad_y = min(10, max(4, int(round(h * 0.10))))
     x1 = max(0, x + pad_x)
     x2 = min(iw, x + w - pad_x)
     y1 = max(0, y + pad_y)
@@ -449,20 +498,47 @@ def ocr_option_card(image, rect):
         return ""
 
     crop = image[y1:y2, x1:x2]
-    work, _ = _limit_ocr_size(crop, 1000)
-    bw = _preprocess_ocr(work)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
+    # Primera pasada: escala de grises. Suele conservar mejor números,
+    # tildes y símbolos que un umbral binario agresivo.
+    work, _ = _limit_ocr_size(gray, 1400)
     try:
-        raw = _run_tesseract(
-            bw,
-            "--oem 1 --psm 7",
-            output_dict=False,
-        )
-    finally:
-        del bw, work, crop
-        gc.collect()
+        best = _ocr_text_variant(work, "--oem 1 --psm 7")
 
-    return _normalize_option_text(raw)
+        # Segunda pasada solo si la primera da señales claras de error.
+        # Se reescala únicamente este pequeño recorte, así que el coste de
+        # memoria sigue siendo muy bajo incluso en Render gratuito.
+        if _ocr_needs_retry(best):
+            up = cv2.resize(
+                work,
+                None,
+                fx=1.5,
+                fy=1.5,
+                interpolation=cv2.INTER_CUBIC,
+            )
+            # Un segundo modo permite recuperar caracteres finos y números
+            # que se pierden con psm 7 en algunas fuentes.
+            retry = _ocr_text_variant(up, "--oem 1 --psm 6")
+            if len(retry) > len(best) or not best:
+                best = retry
+            del up
+            gc.collect()
+
+        # Solo como último recurso hacemos OTSU, y únicamente si aún hay
+        # caracteres sospechosos. No se ejecuta en condiciones normales.
+        if _ocr_needs_retry(best):
+            bw = _preprocess_ocr(work)
+            retry2 = _ocr_text_variant(bw, "--oem 1 --psm 7")
+            if len(retry2) > len(best) or not best:
+                best = retry2
+            del bw
+            gc.collect()
+
+        return best
+    finally:
+        del gray, work, crop
+        gc.collect()
 
 
 def ocr_question(image, first_card_y):
