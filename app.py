@@ -137,404 +137,446 @@ def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\u00a0", " ")).strip()
 
 
-def ocr_lines(image, green_mask=None, red_mask=None, psm=6):
-    """Ejecuta Tesseract usando poca RAM y devuelve líneas con coordenadas.
+def _limit_ocr_size(image, max_width=1000):
+    """Reduce una imagen sin inflar memoria. Devuelve imagen + factor de escala."""
+    h, w = image.shape[:2]
+    if w <= max_width:
+        return image, 1.0
+    scale = max_width / float(w)
+    resized = cv2.resize(
+        image,
+        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return resized, scale
 
-    Además del verde de la respuesta correcta, se neutralizan los grandes
-    bloques rojos usados para marcar respuestas incorrectas. Esto es importante
-    porque el texto negro dentro de un fondo rojo claro puede perder contraste
-    al convertir directamente la captura a escala de grises.
-    """
-    if image is None or image.size == 0:
-        raise ValueError("Imagen vacía.")
 
-    original_h, original_w = image.shape[:2]
+def _preprocess_ocr(image):
+    """Convierte a una imagen muy barata para Tesseract."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # OTSU funciona especialmente bien con texto negro sobre tarjetas blancas,
+    # verdes o rojas claras y evita mantener grandes máscaras en memoria.
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    del gray
+    return bw
 
-    # Trabajamos sobre una copia pequeña y monocroma.
-    work = image.copy()
-    if green_mask is not None:
-        work[green_mask > 0] = (255, 255, 255)
-    if red_mask is not None:
-        work[red_mask > 0] = (255, 255, 255)
 
-    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-
-    scale = min(1.0, OCR_MAX_WIDTH / float(original_w))
-    if scale < 1.0:
-        ocr_w = max(1, int(round(original_w * scale)))
-        ocr_h = max(1, int(round(original_h * scale)))
-        gray = cv2.resize(gray, (ocr_w, ocr_h), interpolation=cv2.INTER_AREA)
-    else:
-        ocr_w, ocr_h = original_w, original_h
-
+def _run_tesseract(image, config, output_dict=False):
+    """Tesseract con límite de tiempo y sin generar hilos extra."""
     try:
-        data = pytesseract.image_to_data(
-            gray,
+        if output_dict:
+            return pytesseract.image_to_data(
+                image,
+                lang=OCR_LANG,
+                config=config,
+                output_type=pytesseract.Output.DICT,
+                timeout=OCR_TIMEOUT,
+            )
+        return pytesseract.image_to_string(
+            image,
             lang=OCR_LANG,
-            config=f"--oem 1 --psm {psm}",
-            output_type=pytesseract.Output.DICT,
+            config=config,
             timeout=OCR_TIMEOUT,
         )
     except RuntimeError as exc:
         raise ValueError(
-            "Tesseract tardó demasiado. La imagen se ha limitado para usar menos memoria."
+            "Tesseract tardó demasiado procesando la captura."
         ) from exc
-    finally:
-        del gray
-        del work
-        gc.collect()
 
-    sx = original_w / float(ocr_w)
-    sy = original_h / float(ocr_h)
 
-    groups = {}
-    total = len(data.get("text", []))
-    for i in range(total):
-        try:
-            conf = float(data["conf"][i])
-        except (ValueError, TypeError):
-            conf = -1
-        if conf < 20:
-            continue
-        text = clean(str(data["text"][i]))
-        if not text:
-            continue
+def _dedupe_rects(rects, y_tolerance=6):
+    """Elimina rectángulos prácticamente iguales, conservando el mayor."""
+    rects = sorted(rects, key=lambda r: (r[1], r[0], -(r[2] * r[3])))
+    result = []
+    for rect in rects:
+        x, y, w, h = rect
+        duplicate = False
+        for ux, uy, uw, uh in result:
+            if (
+                abs(y - uy) <= y_tolerance
+                and abs(x - ux) <= 10
+                and abs(w - uw) <= 20
+                and abs(h - uh) <= 10
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            result.append(rect)
+    return result
 
-        key = (
-            int(data["block_num"][i]),
-            int(data["par_num"][i]),
-            int(data["line_num"][i]),
+
+def _colored_card_candidates(small):
+    """Detecta tarjetas grandes rojas/verdes, incluso si no tienen borde visible."""
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    h, w = small.shape[:2]
+
+    masks = []
+    # Verde de respuesta correcta.
+    masks.append(
+        cv2.inRange(
+            hsv,
+            np.array([35, 20, 120]),
+            np.array([95, 255, 255]),
         )
-        top = int(round(int(data["top"][i]) * sy))
-        left = int(round(int(data["left"][i]) * sx))
-        height = max(1, int(round(int(data["height"][i]) * sy)))
-        groups.setdefault(key, []).append(
-            {
-                "text": text,
-                "left": left,
-                "top": top,
-                "height": height,
-            }
-        )
+    )
+    # Rojo de respuesta incorrecta. Se cubren ambos extremos del rango HSV.
+    red1 = cv2.inRange(
+        hsv,
+        np.array([0, 18, 120]),
+        np.array([15, 255, 255]),
+    )
+    red2 = cv2.inRange(
+        hsv,
+        np.array([165, 18, 120]),
+        np.array([179, 255, 255]),
+    )
+    masks.append(cv2.bitwise_or(red1, red2))
+    del hsv, red1, red2
 
-    lines = []
-    for words in groups.values():
-        words = sorted(words, key=lambda x: x["left"])
-        lines.append(
-            {
-                "text": clean(" ".join(x["text"] for x in words)),
-                "top": min(x["top"] for x in words),
-                "bottom": max(x["top"] + x["height"] for x in words),
-            }
-        )
-    return sorted(lines, key=lambda x: (x["top"], x["text"]))
+    candidates = []
+    min_area = max(1000, int(h * w * 0.015))
+    min_width = int(w * 0.55)
+    min_height = max(18, int(h * 0.055))
 
+    for mask in masks:
+        # Rellenamos pequeños agujeros producidos por el texto negro.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 5))
+        mask2 = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask2)
+        del kernel, mask2
 
-def build_red_mask(image):
-    """Detecta fondos rojos de botones/casillas sin depender de su tono exacto."""
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-    # Cubre rojos normales y rojos claros/pastel como #FEE2E2.
-    red1 = cv2.inRange(hsv, np.array([0, 20, 120]), np.array([12, 255, 255]))
-    red2 = cv2.inRange(hsv, np.array([168, 20, 120]), np.array([179, 255, 255]))
-    mask = cv2.bitwise_or(red1, red2)
-
-    # Solo conservamos componentes suficientemente grandes para que letras
-    # rojas pequeñas no se conviertan en "fondo" y desaparezcan del OCR.
-    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask)
-    h, w = image.shape[:2]
-    cleaned = np.zeros_like(mask)
-    min_area = max(200, int(h * w * 0.001))
-
-    for i in range(1, n_labels):
-        x, y, ww, hh, area = stats[i]
-        if area >= min_area and ww > w * 0.15 and hh > 12:
-            cleaned[y:y + hh, x:x + ww][mask[y:y + hh, x:x + ww] > 0] = 255
-
-    return cleaned
-
-
-def ocr_colored_option_regions(image, green_mask=None, red_mask=None):
-    """Hace OCR directo de las casillas grandes coloreadas.
-
-    Es un respaldo específico para capturas donde una opción roja/verde tiene
-    suficiente contraste de fondo como para que el OCR de página completa la
-    ignore. Al trabajar solo con la casilla, PSM 7 suele recuperar perfectamente
-    "c) Texto", etc.
-    """
-    regions = []
-    h, w = image.shape[:2]
-
-    for mask in (green_mask, red_mask):
-        if mask is None:
-            continue
-        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask)
         for i in range(1, n_labels):
             x, y, ww, hh, area = stats[i]
-            if area <= h * w * 0.02 or ww <= w * 0.5 or hh <= 25:
+            if (
+                area >= min_area
+                and ww >= min_width
+                and hh >= min_height
+                and ww / float(max(hh, 1)) >= 5.0
+                and x <= w * 0.08
+                and x + ww >= w * 0.92
+            ):
+                candidates.append((int(x), int(y), int(ww), int(hh)))
+        del mask
+
+    gc.collect()
+    return candidates
+
+
+
+def _complete_four_cards(candidates, image_width, image_height):
+    """Completa tarjetas que el detector de bordes no haya visto.
+
+    Las capturas de este tipo tienen cuatro tarjetas de altura y separación muy
+    parecidas. Buscamos la progresión vertical de cuatro posiciones que mejor
+    explica las tarjetas realmente detectadas y rellenamos las que falten.
+    """
+    candidates = sorted(candidates, key=lambda r: r[1])
+    if len(candidates) >= 4:
+        return candidates[:4]
+    if len(candidates) < 2:
+        return candidates
+
+    heights = [r[3] for r in candidates]
+    widths = [r[2] for r in candidates]
+    height = int(round(float(np.median(heights))))
+    width = int(round(float(np.median(widths))))
+    x = int(round(float(np.median([r[0] for r in candidates]))))
+    observed = np.array([r[1] for r in candidates], dtype=np.float64)
+
+    best = None
+    n = len(candidates)
+    # Asignamos cada tarjeta observada a una de las 4 posiciones. Las
+    # posiciones deben estar en orden y no pueden repetirse.
+    import itertools
+    for indices in itertools.combinations(range(4), n):
+        first_i = indices[0]
+        last_i = indices[-1]
+        if last_i == first_i:
+            continue
+        d = (observed[-1] - observed[0]) / float(last_i - first_i)
+        if d <= 0:
+            continue
+        if d < height * 0.8 or d > image_height * 0.5:
+            continue
+        start_y = observed[0] - first_i * d
+        predicted = np.array([start_y + k * d for k in range(4)])
+        residuals = [abs(observed[j] - predicted[indices[j]]) for j in range(n)]
+        score = float(sum(residuals))
+        # Penaliza progresiones que saquen una tarjeta fuera de la imagen.
+        if predicted[0] < -height * 0.35 or predicted[-1] > image_height - height * 0.45:
+            continue
+        if best is None or score < best[0]:
+            best = (score, predicted, d)
+
+    if best is None:
+        # Fallback muy conservador: usa la separación mediana entre candidatas.
+        diffs = np.diff(observed)
+        d = float(np.median(diffs)) if len(diffs) else float(height)
+        if d <= 0:
+            return candidates
+        start_y = observed[0]
+        predicted = np.array([start_y + k * d for k in range(4)])
+    else:
+        _, predicted, d = best
+
+    result = []
+    for py in predicted:
+        # Si ya existe una candidata cerca, conservamos sus dimensiones reales.
+        nearest = min(candidates, key=lambda r: abs(r[1] - py))
+        if abs(nearest[1] - py) <= max(8, d * 0.25):
+            result.append(nearest)
+        else:
+            result.append((x, int(round(py)), width, height))
+
+    return sorted(_dedupe_rects(result, y_tolerance=max(6, int(d * 0.12))), key=lambda r: r[1])
+
+def detect_answer_cards(image):
+    """Localiza las cuatro tarjetas de respuestas por su geometría.
+
+    La detección no depende de las letras OCR. Combina los bordes de las
+    tarjetas blancas con la detección directa de tarjetas rojas/verdes que,
+    dependiendo de la captura, pueden no conservar un borde gris visible.
+    """
+    small, scale = _limit_ocr_size(image, 1000)
+    h, w = small.shape[:2]
+
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 30, 110)
+
+    # Une los bordes horizontales de las tarjetas blancas/outline.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 3))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
+    contours, _ = cv2.findContours(
+        closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    del gray, edges, closed, kernel
+
+    candidates = []
+    min_width = max(350, int(w * 0.55))
+    min_height = max(22, int(h * 0.055))
+    max_height = int(h * 0.35)
+
+    for contour in contours:
+        x, y, ww, hh = cv2.boundingRect(contour)
+        if ww < min_width or hh < min_height or hh > max_height:
+            continue
+        if ww / float(max(hh, 1)) < 5.0:
+            continue
+        if x > w * 0.08 or x + ww < w * 0.92:
+            continue
+        candidates.append((x, y, ww, hh))
+
+    # Las tarjetas rojas/verdes se añaden aunque no tengan borde.
+    candidates.extend(_colored_card_candidates(small))
+    del small
+
+    candidates = _dedupe_rects(candidates, y_tolerance=8)
+
+    # Si aparecen más de cuatro, buscamos conjuntos de cuatro con dimensiones
+    # similares y separación vertical razonablemente uniforme.
+    if len(candidates) > 4:
+        candidates.sort(key=lambda r: (r[1], r[0]))
+        groups = []
+        import itertools
+        for idxs in itertools.combinations(range(len(candidates)), 4):
+            group = [candidates[i] for i in idxs]
+            heights = [r[3] for r in group]
+            widths = [r[2] for r in group]
+            ys = [r[1] for r in group]
+            height_ratio = max(heights) / float(max(1, min(heights)))
+            width_ratio = max(widths) / float(max(1, min(widths)))
+            gaps = [ys[j + 1] - (ys[j] + group[j][3]) for j in range(3)]
+            if height_ratio > 1.8 or width_ratio > 1.30:
                 continue
-            regions.append((int(x), int(y), int(ww), int(hh), mask))
+            # El hueco puede variar un poco por las esquinas redondeadas.
+            gap_span = max(gaps) - min(gaps)
+            score = gap_span + (height_ratio - 1) * 100 + (width_ratio - 1) * 100
+            groups.append((score, group))
+        if groups:
+            candidates = min(groups, key=lambda item: item[0])[1]
+        else:
+            candidates = sorted(
+                candidates,
+                key=lambda r: (r[2] * r[3]),
+                reverse=True,
+            )[:4]
 
-    # Evita hacer OCR dos veces sobre una región que pueda aparecer en más de
-    # una máscara.
-    regions.sort(key=lambda r: (r[1], r[0]))
-    unique = []
-    for region in regions:
-        x, y, ww, hh, mask = region
-        if any(
-            abs(x - ux) < 5
-            and abs(y - uy) < 5
-            and abs(ww - uww) < 10
-            and abs(hh - uhh) < 10
-            for ux, uy, uww, uhh, _ in unique
-        ):
-            continue
-        unique.append(region)
+    candidates = sorted(candidates, key=lambda r: (r[1], r[0]))
 
-    recovered = []
-    for x, y, ww, hh, mask in unique:
-        pad = 8
-        x1 = max(0, x - pad)
-        y1 = max(0, y - pad)
-        x2 = min(w, x + ww + pad)
-        y2 = min(h, y + hh + pad)
+    if len(candidates) < 4:
+        candidates = _complete_four_cards(candidates, w, h)
 
-        crop = image[y1:y2, x1:x2].copy()
-        local_mask = mask[y1:y2, x1:x2]
-        crop[local_mask > 0] = (255, 255, 255)
+    candidates = sorted(candidates, key=lambda r: (r[1], r[0]))
 
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        crop_h, crop_w = gray.shape[:2]
-        scale = min(1.0, 1200 / float(crop_w))
-        if scale < 1.0:
-            gray = cv2.resize(
-                gray,
-                (max(1, int(round(crop_w * scale))), max(1, int(round(crop_h * scale)))),
-                interpolation=cv2.INTER_AREA,
+    if scale != 1.0:
+        inv = 1.0 / scale
+        candidates = [
+            (
+                int(round(x * inv)),
+                int(round(y * inv)),
+                int(round(ww * inv)),
+                int(round(hh * inv)),
             )
+            for x, y, ww, hh in candidates
+        ]
 
-        # El rojo/verde claro puede hacer que la "c" se parezca a un 2.
-        # Con un umbral alto dejamos negro el texto y blanco prácticamente
-        # todo el fondo coloreado, manteniendo la lectura de la letra.
-        gray = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)[1]
+    return candidates
 
-        try:
-            text = pytesseract.image_to_string(
-                gray,
-                lang=OCR_LANG,
-                config="--oem 1 --psm 7",
-                timeout=OCR_TIMEOUT,
-            )
-        except RuntimeError:
-            text = ""
-        finally:
-            del gray
-            del crop
-            gc.collect()
+def _normalize_option_text(text):
+    """Quita una etiqueta OCR errónea; la letra real la asignamos por posición."""
+    text = clean(text)
+    # Quitamos la etiqueta solo al principio. No confiamos en ella para decidir
+    # si es a/b/c/d porque precisamente Tesseract puede confundir esas letras.
+    text = re.sub(r"^(?:[a-dA-D0-9€¢©@*|IlT])?\s*[)\].}:.,-]\s*", "", text)
+    text = re.sub(r"^[|IlT]\s*[)\].}:.,-]\s*", "", text)
+    return clean(text)
 
-        text = clean(text)
-        if not text:
-            continue
 
-        # El OCR de la casilla puede devolver solo el contenido sin la letra.
-        # Guardamos la línea y dejamos que el parser normal decida si contiene
-        # una etiqueta a), b), c) o d).
-        recovered.append(
-            {
-                "text": text,
-                "top": int(y),
-                "bottom": int(y + hh),
-            }
+def ocr_option_card(image, rect):
+    """OCR de una única tarjeta de respuesta, con consumo de memoria bajo."""
+    x, y, w, h = rect
+    ih, iw = image.shape[:2]
+
+    # Dejamos el borde fuera del OCR para que no interfiera como caracteres.
+    pad_x = max(24, int(round(w * 0.045)))
+    pad_y = max(8, int(round(h * 0.14)))
+    x1 = max(0, x + pad_x)
+    x2 = min(iw, x + w - pad_x)
+    y1 = max(0, y + pad_y)
+    y2 = min(ih, y + h - pad_y)
+
+    if x2 <= x1 or y2 <= y1:
+        return ""
+
+    crop = image[y1:y2, x1:x2]
+    work, _ = _limit_ocr_size(crop, 1000)
+    bw = _preprocess_ocr(work)
+
+    try:
+        raw = _run_tesseract(
+            bw,
+            "--oem 1 --psm 7",
+            output_dict=False,
         )
+    finally:
+        del bw, work, crop
+        gc.collect()
 
-    return recovered
+    return _normalize_option_text(raw)
+
+
+def ocr_question(image, first_card_y):
+    """OCR únicamente de la zona situada encima de las respuestas."""
+    ih, iw = image.shape[:2]
+    bottom = max(1, min(ih, first_card_y - 8))
+    if bottom < 20:
+        return ""
+
+    crop = image[:bottom, :]
+    work, _ = _limit_ocr_size(crop, OCR_MAX_WIDTH)
+    bw = _preprocess_ocr(work)
+    try:
+        raw = _run_tesseract(
+            bw,
+            "--oem 1 --psm 6",
+            output_dict=False,
+        )
+    finally:
+        del bw, work, crop
+        gc.collect()
+
+    raw = clean(raw)
+    raw = re.sub(r"^(?:Pregunta\s*)?\d+\s*[.)-]?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"^[,;:.|\-–—]+\s*", "", raw)
+    return clean(raw)
 
 
 def parse_capture(path: str):
-    """Extrae pregunta, opciones y la opción marcada en verde.
+    """Extrae exactamente una pregunta y cuatro respuestas.
 
-    Es especialmente tolerante con errores habituales de OCR en capturas:
-    - Tesseract puede leer el borde vertical de una tarjeta como '|', de modo que
-      puede devolver '| b) Texto...' en lugar de 'b) Texto...'.
-    - Dos opciones pueden quedar en una sola línea OCR, por ejemplo
-      'a) Texto A | b) Texto B'.
-    - Puede aparecer ruido antes de la letra de la opción.
+    La regla importante de esta versión es: **las letras no las decide OCR**.
+    Las cuatro tarjetas se detectan visualmente y se ordenan de arriba a abajo;
+    esas posiciones son a), b), c), d). Esto evita errores como c→b, 2→c o
+    letras inventadas, especialmente en capturas grandes.
     """
     image = cv2.imread(path)
     if image is None:
         raise ValueError("No se pudo abrir la imagen.")
 
-    # Detectamos el verde una sola vez y lo reutilizamos para: 
-    # 1) quitarlo del OCR (texto negro sobre blanco), y
-    # 2) localizar la respuesta correcta.
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    green_mask = cv2.inRange(hsv, np.array([35, 20, 140]), np.array([95, 255, 255]))
-    red_mask = build_red_mask(image)
-
-    # PSM 6 es bastante más ligero para este tipo de captura. Pero no damos
-    # por bueno el resultado hasta haber encontrado las cuatro etiquetas a-d.
-    # Así, si la opción roja desaparece del primer OCR, hacemos el fallback.
-    lines = ocr_lines(
-        image, green_mask=green_mask, red_mask=red_mask, psm=6
-    )
-    marker_probe = re.compile(r"(?<![A-Za-z0-9])([a-dA-D])\s*[)\.\-:]\s*")
-    found_letters = {
-        m.group(1).lower()
-        for line in lines
-        for m in marker_probe.finditer(line["text"])
-    }
-
-    # PSM 11 sirve como segundo intento para la página completa. Nos quedamos
-    # con el resultado que detecte más etiquetas, en lugar de mezclar ambos
-    # OCR, porque mezclar líneas puede duplicar o fusionar opciones.
-    if not {"a", "b", "c", "d"}.issubset(found_letters):
-        fallback_lines = ocr_lines(
-            image, green_mask=green_mask, red_mask=red_mask, psm=11
-        )
-        fallback_letters = {
-            m.group(1).lower()
-            for line in fallback_lines
-            for m in marker_probe.finditer(line["text"])
-        }
-        if len(fallback_letters) > len(found_letters):
-            lines = fallback_lines
-            found_letters = fallback_letters
-
-    # Respaldo especialmente robusto para opciones coloreadas. Se ejecuta
-    # cuando falta alguna etiqueta o cuando existe una casilla roja, que es el
-    # caso que más fácilmente se pierde en el OCR de página completa.
-    colored_lines = ocr_colored_option_regions(
-        image, green_mask=green_mask, red_mask=red_mask
-    )
-    valid_colored_lines = [
-        line for line in colored_lines if marker_probe.search(line["text"])
-    ]
-    if valid_colored_lines:
-        # Una casilla coloreada puede generar en el OCR de página una línea
-        # defectuosa como "2) Guadarrama" y otra correcta como "c) Guadarrama".
-        # Si tenemos la lectura específica de la casilla, sustituimos cualquier
-        # línea de página que se encuentre dentro de ese mismo rectángulo.
-        filtered_lines = []
-        for line in lines:
-            line_center = (line["top"] + line["bottom"]) / 2.0
-            inside_colored = any(
-                colored["top"] - 6 <= line_center <= colored["bottom"] + 6
-                for colored in valid_colored_lines
+    try:
+        cards = detect_answer_cards(image)
+        if len(cards) != 4:
+            raise ValueError(
+                f"No he podido localizar exactamente cuatro tarjetas de respuesta (detectadas: {len(cards)})."
             )
-            if not inside_colored:
-                filtered_lines.append(line)
-        lines = filtered_lines + valid_colored_lines
 
-    # Volvemos a ordenar por posición vertical para que la respuesta recuperada
-    # quede exactamente en el sitio de su opción.
-    lines = sorted(lines, key=lambda x: (x["top"], x["text"]))
-
-    # Detecta etiquetas a), b), c), d) incluso si tienen ruido OCR delante.
-    # El lookbehind evita considerar letras de palabras como "a" o "b".
-    marker = re.compile(r"(?<![A-Za-z0-9])([a-dA-D])\s*[)\.\-:]\s*")
-
-    # Convierte líneas OCR como:
-    #   '| b) respuesta B'
-    # o:
-    #   'a) respuesta A | b) respuesta B'
-    # en líneas separadas y normalizadas.
-    expanded_lines = []
-    for line in lines:
-        text = line["text"]
-        matches = list(marker.finditer(text))
-
-        # Una etiqueta de respuesta es válida si está al principio, permitiendo
-        # hasta 8 caracteres de ruido OCR delante (|, [, ], etc.).
-        if not matches or matches[0].start() > 8:
-            expanded_lines.append(line)
-            continue
-
-        for n, match in enumerate(matches):
-            end = matches[n + 1].start() if n + 1 < len(matches) else len(text)
-            answer_text = text[match.end():end].strip(" |[]{}<>\t")
-            normalized = f"{match.group(1).lower()}) {answer_text}".strip()
-            expanded_lines.append(
+        # OCR aislado por tarjeta: nunca mezcla una respuesta con la siguiente.
+        options = []
+        for index, rect in enumerate(cards):
+            text = ocr_option_card(image, rect)
+            if not text:
+                raise ValueError(
+                    f"No he podido leer el texto de la respuesta {index + 1}."
+                )
+            options.append(
                 {
-                    "text": normalized,
-                    "top": line["top"],
-                    "bottom": line["bottom"],
+                    "letter": "abcd"[index],
+                    "text": text,
+                    "top": rect[1],
+                    "bottom": rect[1] + rect[3],
                 }
             )
 
-    # Ahora cada línea de respuesta debe empezar por a), b), c) o d).
-    pat = re.compile(r"^([a-dA-D])\s*[)\.\-:]\s*(.*)$")
-    starts = []
-    seen_letters = set()
-    for i, line in enumerate(expanded_lines):
-        m = pat.match(line["text"])
-        if m:
-            letter = m.group(1).lower()
-            if letter in seen_letters:
-                continue
-            seen_letters.add(letter)
-            starts.append((i, letter, m.group(2).strip(), line))
+        # La pregunta está por encima de la primera tarjeta. Esto evita que el
+        # OCR de la pregunta se contamine con letras/etiquetas de respuestas.
+        question = ocr_question(image, cards[0][1])
+        if not question:
+            raise ValueError("No he podido extraer la pregunta.")
 
-    if len(starts) < 2:
-        raise ValueError("No he detectado las respuestas a), b), c), etc.")
-
-    q_parts = []
-    for line in expanded_lines[:starts[0][0]]:
-        t = re.sub(r"^\d+\.\s*", "", line["text"])
-        if t:
-            q_parts.append(t)
-    question = clean(" ".join(q_parts))
-    if not question:
-        raise ValueError("No he podido extraer la pregunta.")
-
-    options = []
-    for n, (idx, letter, first, line) in enumerate(starts):
-        end = starts[n + 1][0] if n + 1 < len(starts) else len(expanded_lines)
-        top, bottom = line["top"], line["bottom"]
-        pieces = [first] if first else []
-        for extra in expanded_lines[idx + 1 : end]:
-            # Si otra línea empieza por a), b), c) o d), es otra lectura de una
-            # etiqueta de opción (por ejemplo la misma casilla coloreada), no
-            # texto adicional de la opción actual. No la concatenamos.
-            if pat.match(extra["text"]):
-                continue
-            pieces.append(extra["text"])
-            top = min(top, extra["top"])
-            bottom = max(bottom, extra["bottom"])
-        options.append(
-            {
-                "letter": letter,
-                "text": clean(" ".join(pieces)),
-                "top": top,
-                "bottom": bottom,
-            }
+        # Detectamos el verde solamente después de extraer las cuatro tarjetas.
+        # No usamos OCR para decidir cuál es correcta.
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        green_mask = cv2.inRange(
+            hsv,
+            np.array([35, 20, 140]),
+            np.array([95, 255, 255]),
         )
+        del hsv
 
-    # Detecta el gran rectángulo verde de la respuesta correcta.
-    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(green_mask)
-    greens = []
-    h, w = image.shape[:2]
-    for i in range(1, n_labels):
-        x, y, ww, hh, area = stats[i]
-        if area > h * w * 0.02 and ww > w * 0.5 and hh > 25:
-            greens.append((int(y), int(y + hh), int(area)))
-    if not greens:
-        raise ValueError("No he encontrado la respuesta correcta marcada en verde.")
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(green_mask)
+        h, w = image.shape[:2]
+        greens = []
+        for i in range(1, n_labels):
+            x, y, ww, hh, area = stats[i]
+            if area > h * w * 0.02 and ww > w * 0.5 and hh > 25:
+                greens.append((int(y), int(y + hh), int(area)))
 
-    gy1, gy2, _ = max(greens, key=lambda x: x[2])
-    overlaps = [
-        max(0, min(o["bottom"], gy2) - max(o["top"], gy1)) for o in options
-    ]
-    if max(overlaps) <= 0:
-        raise ValueError("He encontrado el verde, pero no coincide con ninguna respuesta detectada.")
+        del green_mask
+        gc.collect()
 
-    correct = overlaps.index(max(overlaps))
+        if not greens:
+            raise ValueError("No he encontrado la respuesta correcta marcada en verde.")
 
-    return (
-        question,
-        [{"letter": o["letter"], "text": o["text"]} for o in options],
-        correct,
-    )
+        gy1, gy2, _ = max(greens, key=lambda item: item[2])
+        overlaps = [
+            max(0, min(card[1] + card[3], gy2) - max(card[1], gy1))
+            for card in cards
+        ]
+        correct = int(np.argmax(overlaps))
 
+        if overlaps[correct] <= 0:
+            raise ValueError(
+                "He encontrado el verde, pero no coincide con ninguna respuesta."
+            )
+
+        return (
+            question,
+            [{"letter": o["letter"], "text": o["text"]} for o in options],
+            correct,
+        )
+    finally:
+        del image
+        gc.collect()
 
 def parse_options(value):
     if isinstance(value, list):
