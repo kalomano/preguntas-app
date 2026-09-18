@@ -137,18 +137,13 @@ def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\u00a0", " ")).strip()
 
 
-def ocr_lines(image, green_mask=None, psm=6):
+def ocr_lines(image, green_mask=None, red_mask=None, psm=6):
     """Ejecuta Tesseract usando poca RAM y devuelve líneas con coordenadas.
 
-    Medidas importantes para Render:
-    - limita el ancho de la imagen antes del OCR;
-    - convierte a escala de grises;
-    - blanquea el fondo verde para que no perjudique el OCR;
-    - limita Tesseract a un hilo mediante OpenMP;
-    - impone un timeout para que una imagen problemática no bloquee Gunicorn.
-
-    Las coordenadas se devuelven escaladas de nuevo al tamaño original, por lo
-    que el resto del algoritmo sigue trabajando sobre la imagen original.
+    Además del verde de la respuesta correcta, se neutralizan los grandes
+    bloques rojos usados para marcar respuestas incorrectas. Esto es importante
+    porque el texto negro dentro de un fondo rojo claro puede perder contraste
+    al convertir directamente la captura a escala de grises.
     """
     if image is None or image.size == 0:
         raise ValueError("Imagen vacía.")
@@ -156,10 +151,11 @@ def ocr_lines(image, green_mask=None, psm=6):
     original_h, original_w = image.shape[:2]
 
     # Trabajamos sobre una copia pequeña y monocroma.
-    work = image
+    work = image.copy()
     if green_mask is not None:
-        work = image.copy()
         work[green_mask > 0] = (255, 255, 255)
+    if red_mask is not None:
+        work[red_mask > 0] = (255, 255, 255)
 
     gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
 
@@ -180,9 +176,6 @@ def ocr_lines(image, green_mask=None, psm=6):
             timeout=OCR_TIMEOUT,
         )
     except RuntimeError as exc:
-        # pytesseract lanza RuntimeError cuando alcanza el timeout. Convertimos
-        # esto en un error claro y controlado en vez de dejar que Gunicorn mate
-        # el worker por esperar demasiado.
         raise ValueError(
             "Tesseract tardó demasiado. La imagen se ha limitado para usar menos memoria."
         ) from exc
@@ -237,6 +230,126 @@ def ocr_lines(image, green_mask=None, psm=6):
     return sorted(lines, key=lambda x: (x["top"], x["text"]))
 
 
+def build_red_mask(image):
+    """Detecta fondos rojos de botones/casillas sin depender de su tono exacto."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # Cubre rojos normales y rojos claros/pastel como #FEE2E2.
+    red1 = cv2.inRange(hsv, np.array([0, 20, 120]), np.array([12, 255, 255]))
+    red2 = cv2.inRange(hsv, np.array([168, 20, 120]), np.array([179, 255, 255]))
+    mask = cv2.bitwise_or(red1, red2)
+
+    # Solo conservamos componentes suficientemente grandes para que letras
+    # rojas pequeñas no se conviertan en "fondo" y desaparezcan del OCR.
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    h, w = image.shape[:2]
+    cleaned = np.zeros_like(mask)
+    min_area = max(200, int(h * w * 0.001))
+
+    for i in range(1, n_labels):
+        x, y, ww, hh, area = stats[i]
+        if area >= min_area and ww > w * 0.15 and hh > 12:
+            cleaned[y:y + hh, x:x + ww][mask[y:y + hh, x:x + ww] > 0] = 255
+
+    return cleaned
+
+
+def ocr_colored_option_regions(image, green_mask=None, red_mask=None):
+    """Hace OCR directo de las casillas grandes coloreadas.
+
+    Es un respaldo específico para capturas donde una opción roja/verde tiene
+    suficiente contraste de fondo como para que el OCR de página completa la
+    ignore. Al trabajar solo con la casilla, PSM 7 suele recuperar perfectamente
+    "c) Texto", etc.
+    """
+    regions = []
+    h, w = image.shape[:2]
+
+    for mask in (green_mask, red_mask):
+        if mask is None:
+            continue
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+        for i in range(1, n_labels):
+            x, y, ww, hh, area = stats[i]
+            if area <= h * w * 0.02 or ww <= w * 0.5 or hh <= 25:
+                continue
+            regions.append((int(x), int(y), int(ww), int(hh), mask))
+
+    # Evita hacer OCR dos veces sobre una región que pueda aparecer en más de
+    # una máscara.
+    regions.sort(key=lambda r: (r[1], r[0]))
+    unique = []
+    for region in regions:
+        x, y, ww, hh, mask = region
+        if any(
+            abs(x - ux) < 5
+            and abs(y - uy) < 5
+            and abs(ww - uww) < 10
+            and abs(hh - uhh) < 10
+            for ux, uy, uww, uhh, _ in unique
+        ):
+            continue
+        unique.append(region)
+
+    recovered = []
+    for x, y, ww, hh, mask in unique:
+        pad = 8
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w, x + ww + pad)
+        y2 = min(h, y + hh + pad)
+
+        crop = image[y1:y2, x1:x2].copy()
+        local_mask = mask[y1:y2, x1:x2]
+        crop[local_mask > 0] = (255, 255, 255)
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        crop_h, crop_w = gray.shape[:2]
+        scale = min(1.0, 1200 / float(crop_w))
+        if scale < 1.0:
+            gray = cv2.resize(
+                gray,
+                (max(1, int(round(crop_w * scale))), max(1, int(round(crop_h * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        # El rojo/verde claro puede hacer que la "c" se parezca a un 2.
+        # Con un umbral alto dejamos negro el texto y blanco prácticamente
+        # todo el fondo coloreado, manteniendo la lectura de la letra.
+        gray = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)[1]
+
+        try:
+            text = pytesseract.image_to_string(
+                gray,
+                lang=OCR_LANG,
+                config="--oem 1 --psm 7",
+                timeout=OCR_TIMEOUT,
+            )
+        except RuntimeError:
+            text = ""
+        finally:
+            del gray
+            del crop
+            gc.collect()
+
+        text = clean(text)
+        if not text:
+            continue
+
+        # El OCR de la casilla puede devolver solo el contenido sin la letra.
+        # Guardamos la línea y dejamos que el parser normal decida si contiene
+        # una etiqueta a), b), c) o d).
+        recovered.append(
+            {
+                "text": text,
+                "top": int(y),
+                "bottom": int(y + hh),
+            }
+        )
+
+    return recovered
+
+
 def parse_capture(path: str):
     """Extrae pregunta, opciones y la opción marcada en verde.
 
@@ -256,14 +369,65 @@ def parse_capture(path: str):
     # 2) localizar la respuesta correcta.
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     green_mask = cv2.inRange(hsv, np.array([35, 20, 140]), np.array([95, 255, 255]))
+    red_mask = build_red_mask(image)
 
-    # PSM 6 es bastante más ligero para este tipo de captura. Solo probamos
-    # PSM 11 si no aparecen suficientes etiquetas de respuesta.
-    lines = ocr_lines(image, green_mask=green_mask, psm=6)
+    # PSM 6 es bastante más ligero para este tipo de captura. Pero no damos
+    # por bueno el resultado hasta haber encontrado las cuatro etiquetas a-d.
+    # Así, si la opción roja desaparece del primer OCR, hacemos el fallback.
+    lines = ocr_lines(
+        image, green_mask=green_mask, red_mask=red_mask, psm=6
+    )
     marker_probe = re.compile(r"(?<![A-Za-z0-9])([a-dA-D])\s*[)\.\-:]\s*")
-    marker_count = sum(bool(marker_probe.search(line["text"])) for line in lines)
-    if marker_count < 2:
-        lines = ocr_lines(image, green_mask=green_mask, psm=11)
+    found_letters = {
+        m.group(1).lower()
+        for line in lines
+        for m in marker_probe.finditer(line["text"])
+    }
+
+    # PSM 11 sirve como segundo intento para la página completa. Nos quedamos
+    # con el resultado que detecte más etiquetas, en lugar de mezclar ambos
+    # OCR, porque mezclar líneas puede duplicar o fusionar opciones.
+    if not {"a", "b", "c", "d"}.issubset(found_letters):
+        fallback_lines = ocr_lines(
+            image, green_mask=green_mask, red_mask=red_mask, psm=11
+        )
+        fallback_letters = {
+            m.group(1).lower()
+            for line in fallback_lines
+            for m in marker_probe.finditer(line["text"])
+        }
+        if len(fallback_letters) > len(found_letters):
+            lines = fallback_lines
+            found_letters = fallback_letters
+
+    # Respaldo especialmente robusto para opciones coloreadas. Se ejecuta
+    # cuando falta alguna etiqueta o cuando existe una casilla roja, que es el
+    # caso que más fácilmente se pierde en el OCR de página completa.
+    colored_lines = ocr_colored_option_regions(
+        image, green_mask=green_mask, red_mask=red_mask
+    )
+    valid_colored_lines = [
+        line for line in colored_lines if marker_probe.search(line["text"])
+    ]
+    if valid_colored_lines:
+        # Una casilla coloreada puede generar en el OCR de página una línea
+        # defectuosa como "2) Guadarrama" y otra correcta como "c) Guadarrama".
+        # Si tenemos la lectura específica de la casilla, sustituimos cualquier
+        # línea de página que se encuentre dentro de ese mismo rectángulo.
+        filtered_lines = []
+        for line in lines:
+            line_center = (line["top"] + line["bottom"]) / 2.0
+            inside_colored = any(
+                colored["top"] - 6 <= line_center <= colored["bottom"] + 6
+                for colored in valid_colored_lines
+            )
+            if not inside_colored:
+                filtered_lines.append(line)
+        lines = filtered_lines + valid_colored_lines
+
+    # Volvemos a ordenar por posición vertical para que la respuesta recuperada
+    # quede exactamente en el sitio de su opción.
+    lines = sorted(lines, key=lambda x: (x["top"], x["text"]))
 
     # Detecta etiquetas a), b), c), d) incluso si tienen ruido OCR delante.
     # El lookbehind evita considerar letras de palabras como "a" o "b".
@@ -328,6 +492,11 @@ def parse_capture(path: str):
         top, bottom = line["top"], line["bottom"]
         pieces = [first] if first else []
         for extra in expanded_lines[idx + 1 : end]:
+            # Si otra línea empieza por a), b), c) o d), es otra lectura de una
+            # etiqueta de opción (por ejemplo la misma casilla coloreada), no
+            # texto adicional de la opción actual. No la concatenamos.
+            if pat.match(extra["text"]):
+                continue
             pieces.append(extra["text"])
             top = min(top, extra["top"])
             bottom = max(bottom, extra["bottom"])
