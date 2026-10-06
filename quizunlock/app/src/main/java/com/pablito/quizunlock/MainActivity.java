@@ -191,7 +191,7 @@ public class MainActivity extends Activity {
     private void confirmDelete(QuestionBank.BankInfo bank) {
         new AlertDialog.Builder(this)
                 .setTitle("Borrar conjunto")
-                .setMessage("Se eliminará \\"" + bank.name + "\\" y sus preguntas.")
+                .setMessage("Se eliminará el conjunto " + bank.name + " y sus preguntas.")
                 .setNegativeButton("Cancelar", null)
                 .setPositiveButton("Borrar", (dialog, which) -> {
                     QuestionBank.deleteBank(this, bank.id);
