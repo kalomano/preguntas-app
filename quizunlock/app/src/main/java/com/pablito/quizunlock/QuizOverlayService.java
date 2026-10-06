@@ -13,6 +13,9 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
+import android.app.KeyguardManager;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -47,6 +50,8 @@ public class QuizOverlayService extends Service {
     private BroadcastReceiver screenReceiver;
     private Question currentQuestion;
     private boolean registered = false;
+    private final Handler unlockHandler = new Handler(Looper.getMainLooper());
+    private Runnable unlockCheck;
 
     @Override
     public void onCreate() {
@@ -94,7 +99,10 @@ public class QuizOverlayService extends Service {
                 String action = intent.getAction();
 
                 if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    unlockHandler.removeCallbacksAndMessages(null);
                     hideQuestion();
+                } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                    scheduleUnlockCheck();
                 } else if (Intent.ACTION_USER_PRESENT.equals(action)) {
                     maybeShowQuestion();
                 }
@@ -102,9 +110,7 @@ public class QuizOverlayService extends Service {
         };
 
         IntentFilter filter = new IntentFilter();
-        filter.addAction(Intent.ACTION_SCREEN_OFF);
-        filter.addAction(Intent.ACTION_USER_PRESENT);
-
+        filter.addAction(Intent.ACTION_SCREEN_OFF);\n        filter.addAction(Intent.ACTION_SCREEN_ON);\n        filter.addAction(Intent.ACTION_USER_PRESENT);\n
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -113,26 +119,46 @@ public class QuizOverlayService extends Service {
         registered = true;
     }
 
+    private void scheduleUnlockCheck() {
+        unlockHandler.removeCallbacksAndMessages(null);
+        unlockCheck = new Runnable() {
+            int attempts = 0;
+            @Override public void run() {
+                attempts++;
+                KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+                boolean locked = km != null && km.isKeyguardLocked();
+                if (!locked) {
+                    maybeShowQuestion();
+                    return;
+                }
+                if (attempts < 20) unlockHandler.postDelayed(this, 500L);
+            }
+        };
+        unlockHandler.postDelayed(unlockCheck, 700L);
+    }
+
     private void maybeShowQuestion() {
         if (!getSharedPreferences("settings", MODE_PRIVATE)
                 .getBoolean("enabled", false)) return;
         if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) return;
+        KeyguardManager keyguardManager = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        if (keyguardManager != null && keyguardManager.isKeyguardLocked()) return;
         if (overlay != null) return;
 
         List<Question> questions = QuestionBank.loadAll(this);
         if (questions.isEmpty()) return;
 
         Question pending = getPendingQuestion(questions);
-        if (pending != null) {
-            showQuiz(pending, isFailedYesterday(pending));
+        long lastQuestionAt = getSharedPreferences("settings", MODE_PRIVATE)
+                .getLong("lastQuestionAt", 0L);
+
+        if (lastQuestionAt != 0L
+                && System.currentTimeMillis() - lastQuestionAt < SIX_MINUTES_MS) {
             return;
         }
 
-        long lastAnswered = getSharedPreferences("settings", MODE_PRIVATE)
-                .getLong("lastAnsweredAt", 0L);
-
-        if (lastAnswered != 0L
-                && System.currentTimeMillis() - lastAnswered < SIX_MINUTES_MS) {
+        if (pending != null) {
+            showQuiz(pending, isFailedYesterday(pending));
             return;
         }
 
@@ -142,6 +168,7 @@ public class QuizOverlayService extends Service {
         getSharedPreferences("settings", MODE_PRIVATE)
                 .edit()
                 .putString("pendingQuestionId", selected.id)
+                .putLong("lastQuestionAt", System.currentTimeMillis())
                 .apply();
 
         showQuiz(selected, isFailedYesterday(selected));
@@ -341,7 +368,7 @@ public class QuizOverlayService extends Service {
 
         getSharedPreferences("settings", MODE_PRIVATE)
                 .edit()
-                .putLong("lastAnsweredAt", System.currentTimeMillis())
+                .putLong("lastQuestionAt", System.currentTimeMillis())
                 .remove("pendingQuestionId")
                 .remove(failedKey(currentQuestion.id))
                 .apply();
