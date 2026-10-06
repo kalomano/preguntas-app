@@ -150,7 +150,9 @@ public class QuizOverlayService extends Service {
 
         Question pending = getPendingQuestion(questions);
         long lastQuestionAt = getSharedPreferences("settings", MODE_PRIVATE)
-                .getLong("lastQuestionAt", 0L);
+                .getLong("lastQuestionAt",
+                        getSharedPreferences("settings", MODE_PRIVATE)
+                                .getLong("lastAnsweredAt", 0L));
 
         if (lastQuestionAt != 0L
                 && System.currentTimeMillis() - lastQuestionAt < SIX_MINUTES_MS) {
