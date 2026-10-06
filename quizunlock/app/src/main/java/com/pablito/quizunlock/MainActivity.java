@@ -12,6 +12,8 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.view.Gravity;
@@ -31,6 +33,13 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private LinearLayout banksContainer;
     private TextView statusText;
+    private final Handler statusHandler = new Handler(Looper.getMainLooper());
+    private final Runnable statusTicker = new Runnable() {
+        @Override public void run() {
+            refreshStatus();
+            statusHandler.postDelayed(this, 1000L);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -49,7 +58,17 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (banksContainer != null) refreshBanks();
-        if (statusText != null) refreshStatus();
+        if (statusText != null) {
+            refreshStatus();
+            statusHandler.removeCallbacks(statusTicker);
+            statusHandler.post(statusTicker);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        statusHandler.removeCallbacks(statusTicker);
     }
 
     private void buildUi() {
@@ -135,7 +154,9 @@ public class MainActivity extends Activity {
 
         for (QuestionBank.BankInfo bank : banks) {
             LinearLayout row = card();
-            row.setPadding(dp(16), dp(14), dp(10), dp(14));
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(16), dp(12), dp(10), dp(12));
 
             LinearLayout info = new LinearLayout(this);
             info.setOrientation(LinearLayout.VERTICAL);
@@ -164,7 +185,7 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         if (statusText == null) return;
 
-        long last = prefs.getLong("lastAnsweredAt", 0L);
+        long last = prefs.getLong("lastQuestionAt", 0L);
         boolean enabled = prefs.getBoolean("enabled", false);
 
         if (!enabled) {
@@ -179,12 +200,12 @@ public class MainActivity extends Activity {
 
         long remaining = Math.max(0L, SIX_MINUTES_MS - (System.currentTimeMillis() - last));
         if (remaining == 0L) {
-            statusText.setText("Activo · ya toca pregunta al próximo desbloqueo");
+            statusText.setText("✅ ACTIVA · toca pregunta al próximo desbloqueo");
         } else {
             long min = remaining / 60_000L;
             long sec = (remaining % 60_000L) / 1000L;
             statusText.setText(String.format(Locale.getDefault(),
-                    "Activo · próxima elegible en ~%02d:%02d", min, sec));
+                    "⏱️ ACTIVA · próxima pregunta en %02d:%02d", min, sec));
         }
     }
 
