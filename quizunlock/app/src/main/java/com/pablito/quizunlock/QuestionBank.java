@@ -287,11 +287,9 @@ public final class QuestionBank {
     }
 
     private static String makeId(String bankId, String question, String[] options) {
-        StringBuilder source = new StringBuilder(bankId).append('
-').append(question);
+        StringBuilder source = new StringBuilder(bankId).append("|").append(question);
         for (String option : options) {
-            source.append('
-').append(option);
+            source.append("|").append(option);
         }
 
         try {
