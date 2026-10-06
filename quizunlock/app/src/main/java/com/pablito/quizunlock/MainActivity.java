@@ -185,7 +185,8 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         if (statusText == null) return;
 
-        long last = prefs.getLong("lastQuestionAt", 0L);
+        long last = prefs.getLong("lastQuestionAt",
+                prefs.getLong("lastAnsweredAt", 0L));
         boolean enabled = prefs.getBoolean("enabled", false);
 
         if (!enabled) {
