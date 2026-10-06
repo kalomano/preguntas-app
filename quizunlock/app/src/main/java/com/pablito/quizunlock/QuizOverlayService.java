@@ -110,7 +110,10 @@ public class QuizOverlayService extends Service {
         };
 
         IntentFilter filter = new IntentFilter();
-        filter.addAction(Intent.ACTION_SCREEN_OFF);\n        filter.addAction(Intent.ACTION_SCREEN_ON);\n        filter.addAction(Intent.ACTION_USER_PRESENT);\n
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
