@@ -5,11 +5,13 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -120,6 +122,68 @@ public final class QuestionBank {
             result.addAll(parseFile(file, id, name));
         }
         return result;
+    }
+
+    public static boolean deleteQuestion(Context context, String questionId) {
+        if (questionId == null || questionId.isEmpty()) return false;
+
+        File[] files = context.getFilesDir().listFiles((d, name) ->
+                name.startsWith(BANK_PREFIX) && name.endsWith(BANK_SUFFIX));
+        if (files == null) return false;
+
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        for (File file : files) {
+            String bankId = file.getName().substring(BANK_PREFIX.length(),
+                    file.getName().length() - BANK_SUFFIX.length());
+            String bankName = prefs.getString("bank_" + bankId + "_name", "Conjunto " + bankId);
+            List<Question> questions = parseFile(file, bankId, bankName);
+
+            boolean found = false;
+            List<Question> remaining = new ArrayList<>();
+            for (Question q : questions) {
+                if (questionId.equals(q.id)) found = true;
+                else remaining.add(q);
+            }
+
+            if (!found) continue;
+            return writeBank(file, remaining);
+        }
+        return false;
+    }
+
+    private static boolean writeBank(File file, List<Question> questions) {
+        File temp = new File(file.getParentFile(), file.getName() + ".tmp");
+        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
+                new FileOutputStream(temp), StandardCharsets.UTF_8))) {
+            writer.write("Pregunta;A;B;C;D;Correcta");
+            writer.newLine();
+            for (Question q : questions) {
+                writer.write(csv(q.text));
+                for (int i = 0; i < 4; i++) {
+                    writer.write(';');
+                    writer.write(csv(q.options[i]));
+                }
+                writer.write(';');
+                writer.write(Integer.toString(q.correctIndex + 1));
+                writer.newLine();
+            }
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            temp.delete();
+            return false;
+        }
+
+        if (!temp.renameTo(file)) {
+            //noinspection ResultOfMethodCallIgnored
+            temp.delete();
+            return false;
+        }
+        return true;
+    }
+
+    private static String csv(String value) {
+        String safe = value == null ? "" : value;
+        return "\"" + safe.replace("\"", "\"\"") + "\"";
     }
 
     public static Question findById(Context context, String questionId) {
