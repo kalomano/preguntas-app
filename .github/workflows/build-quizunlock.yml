@@ -28,11 +28,27 @@ jobs:
           gradle-version: "9.1.0"
 
       - name: Build APK
-        run: gradle --no-daemon assembleDebug
+        env:
+          KEYSTORE_B64: ${{ secrets.QUIZ_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.QUIZ_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.QUIZ_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.QUIZ_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > app/quiz-release.keystore
+            export QUIZ_KEYSTORE_PATH="$GITHUB_WORKSPACE/quizunlock/app/quiz-release.keystore"
+            export QUIZ_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+            export QUIZ_KEY_ALIAS="$KEY_ALIAS"
+            export QUIZ_KEY_PASSWORD="$KEY_PASSWORD"
+            gradle --no-daemon assembleRelease
+          else
+            echo "No hay clave de firma persistente configurada; se genera un APK debug."
+            gradle --no-daemon assembleDebug
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: QuizUnlock-debug
-          path: quizunlock/app/build/outputs/apk/debug/app-debug.apk
+          name: QuizUnlock-v2
+          path: quizunlock/app/build/outputs/apk/*/*.apk
           if-no-files-found: error
