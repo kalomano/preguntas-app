@@ -1,8 +1,10 @@
 package com.pablito.quizunlock;
 
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -43,7 +45,8 @@ import java.util.Random;
 public class QuizOverlayService extends Service {
     private static final int NOTIFICATION_ID = 1001;
     private static final String CHANNEL_ID = "quiz_unlock";
-    private static final long SIX_MINUTES_MS = 6L * 60L * 1000L;
+    private static final long DEFAULT_INTERVAL_MS = 6L * 60L * 1000L;
+    private static final int RESTART_REQUEST_CODE = 9081;
 
     private WindowManager windowManager;
     private View overlay;
@@ -71,7 +74,7 @@ public class QuizOverlayService extends Service {
     private void startAsForeground() {
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("Quiz Unlock activo")
-                .setContentText("Te pregunta al desbloquear después de 6 minutos")
+                .setContentText("Te pregunta al desbloquear según el intervalo configurado")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setOngoing(true)
                 .build();
@@ -152,13 +155,14 @@ public class QuizOverlayService extends Service {
         if (questions.isEmpty()) return;
 
         Question pending = getPendingQuestion(questions);
+        long interval = getIntervalMs();
         long lastQuestionAt = getSharedPreferences("settings", MODE_PRIVATE)
                 .getLong("lastQuestionAt",
                         getSharedPreferences("settings", MODE_PRIVATE)
                                 .getLong("lastAnsweredAt", 0L));
 
         if (lastQuestionAt != 0L
-                && System.currentTimeMillis() - lastQuestionAt < SIX_MINUTES_MS) {
+                && System.currentTimeMillis() - lastQuestionAt < interval) {
             return;
         }
 
@@ -216,6 +220,37 @@ public class QuizOverlayService extends Service {
 
     private String failedKey(String questionId) {
         return "failed_" + questionId;
+    }
+
+    private long getIntervalMs() {
+        return Math.max(60_000L,
+                getSharedPreferences("settings", MODE_PRIVATE)
+                        .getLong("intervalMs", DEFAULT_INTERVAL_MS));
+    }
+
+    private void discardCurrentQuestion() {
+        if (currentQuestion == null || overlay == null) return;
+
+        QuestionBank.deleteQuestion(this, currentQuestion.id);
+        getSharedPreferences("settings", MODE_PRIVATE)
+                .edit()
+                .remove("pendingQuestionId")
+                .apply();
+
+        List<Question> remaining = QuestionBank.loadAll(this);
+        if (remaining.isEmpty()) {
+            hideQuestion();
+            return;
+        }
+
+        Question next = chooseQuestion(remaining);
+        currentQuestion = next;
+        getSharedPreferences("settings", MODE_PRIVATE)
+                .edit()
+                .putString("pendingQuestionId", next.id)
+                .apply();
+
+        showQuizContent((FrameLayout) overlay, next, isFailedYesterday(next));
     }
 
     private String todayKey() {
@@ -303,6 +338,10 @@ public class QuizOverlayService extends Service {
         bank.setGravity(Gravity.CENTER);
         content.addView(bank, marginTop(18));
 
+        Button discard = makeSecondaryButton("🗑️ Borrar pregunta y hacer otra");
+        discard.setOnClickListener(v -> discardCurrentQuestion());
+        content.addView(discard, marginTop(14));
+
         scroll.addView(content);
         root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
     }
@@ -364,6 +403,10 @@ public class QuizOverlayService extends Service {
                 showQuizContent(root, currentQuestion, false));
         content.addView(retry, marginTop(28));
 
+        Button discard = makeSecondaryButton("🗑️ Borrar pregunta y hacer otra");
+        discard.setOnClickListener(v -> discardCurrentQuestion());
+        content.addView(discard, marginTop(12));
+
         root.addView(content, new FrameLayout.LayoutParams(-1, -1));
         feedbackAnimation(content);
     }
@@ -404,7 +447,7 @@ public class QuizOverlayService extends Service {
         TextView note = makeText(
                 recovered
                         ? "🔥 Pregunta recuperada. Ya no queda pendiente."
-                        : "Bien. La próxima será cuando hayan pasado 6 minutos.",
+                        : "Bien. La próxima será cuando pasen " + (getIntervalMs() / 60_000L) + " minutos.",
                 16, Color.rgb(144, 255, 178), Typeface.NORMAL);
         note.setGravity(Gravity.CENTER);
         content.addView(note, marginTop(18));
@@ -508,6 +551,16 @@ public class QuizOverlayService extends Service {
         return button;
     }
 
+    private Button makeSecondaryButton(String text) {
+        Button button = makeFeedbackButton(text);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.rgb(31, 45, 64));
+        bg.setCornerRadius(dp(18));
+        bg.setStroke(dp(1), Color.rgb(75, 92, 114));
+        button.setBackground(bg);
+        return button;
+    }
+
     private Button makeFeedbackButton(String text) {
         Button button = new Button(this);
         button.setText(text);
@@ -572,7 +625,36 @@ public class QuizOverlayService extends Service {
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        scheduleServiceRestart();
+        super.onTaskRemoved(rootIntent);
+    }
+
+    private void scheduleServiceRestart() {
+        if (!getSharedPreferences("settings", MODE_PRIVATE)
+                .getBoolean("enabled", false)) return;
+        try {
+            AlarmManager alarmManager = (AlarmManager) getSystemService(ALARM_SERVICE);
+            Intent intent = new Intent(this, ServiceRestartReceiver.class);
+            PendingIntent pendingIntent = PendingIntent.getBroadcast(
+                    this, RESTART_REQUEST_CODE, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            if (alarmManager != null) {
+                alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        System.currentTimeMillis() + 5000L,
+                        pendingIntent);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
     public void onDestroy() {
+        if (getSharedPreferences("settings", MODE_PRIVATE)
+                .getBoolean("enabled", false)) {
+            scheduleServiceRestart();
+        }
         hideQuestion();
         if (registered && screenReceiver != null) {
             try {
