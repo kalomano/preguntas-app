@@ -3,6 +3,7 @@ package com.pablito.quizunlock;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -14,12 +15,14 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.NumberPicker;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -29,10 +32,13 @@ import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int REQ_FILE = 42;
-    private static final long SIX_MINUTES_MS = 6L * 60L * 1000L;
+    private static final long DEFAULT_INTERVAL_MS = 6L * 60L * 1000L;
+    private static final int MIN_INTERVAL_MINUTES = 1;
+    private static final int MAX_INTERVAL_MINUTES = 60;
     private SharedPreferences prefs;
     private LinearLayout banksContainer;
     private TextView statusText;
+    private Button timerButton;
     private final Handler statusHandler = new Handler(Looper.getMainLooper());
     private final Runnable statusTicker = new Runnable() {
         @Override public void run() {
@@ -58,6 +64,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (banksContainer != null) refreshBanks();
+        if (timerButton != null) refreshTimerButton();
         if (statusText != null) {
             refreshStatus();
             statusHandler.removeCallbacks(statusTicker);
@@ -105,6 +112,10 @@ public class MainActivity extends Activity {
         permission.setOnClickListener(v -> requestOverlayPermission());
         root.addView(permission, marginTop(14));
 
+        timerButton = primaryButton("");
+        timerButton.setOnClickListener(v -> showIntervalDialog());
+        root.addView(timerButton, marginTop(10));
+
         Button importBtn = primaryButton("＋  Importar conjunto de preguntas");
         importBtn.setOnClickListener(v -> openCsvPicker());
         root.addView(importBtn, marginTop(10));
@@ -126,6 +137,10 @@ public class MainActivity extends Activity {
         disable.setOnClickListener(v -> disableLock());
         root.addView(disable, marginTop(10));
 
+        Button keepAlive = secondaryButton("🛡️ Mantener la app activa");
+        keepAlive.setOnClickListener(v -> requestKeepAliveSettings());
+        root.addView(keepAlive, marginTop(10));
+
         TextView format = text(
                 "Formato: Pregunta;A;B;C;D;Correcta.\n"
                         + "Correcta = 1–4 o A–D. También admite CSV con comas y campos entre comillas.",
@@ -136,6 +151,7 @@ public class MainActivity extends Activity {
         scroll.addView(root);
         setContentView(scroll);
         refreshBanks();
+        refreshTimerButton();
         refreshStatus();
     }
 
@@ -199,7 +215,8 @@ public class MainActivity extends Activity {
             return;
         }
 
-        long remaining = Math.max(0L, SIX_MINUTES_MS - (System.currentTimeMillis() - last));
+        long interval = getIntervalMs();
+        long remaining = Math.max(0L, interval - (System.currentTimeMillis() - last));
         if (remaining == 0L) {
             statusText.setText("✅ ACTIVA · toca pregunta al próximo desbloqueo");
         } else {
@@ -207,6 +224,84 @@ public class MainActivity extends Activity {
             long sec = (remaining % 60_000L) / 1000L;
             statusText.setText(String.format(Locale.getDefault(),
                     "⏱️ ACTIVA · próxima pregunta en %02d:%02d", min, sec));
+        }
+    }
+
+    private long getIntervalMs() {
+        return Math.max(60_000L, prefs.getLong("intervalMs", DEFAULT_INTERVAL_MS));
+    }
+
+    private void refreshTimerButton() {
+        if (timerButton == null) return;
+        long minutes = Math.max(MIN_INTERVAL_MINUTES,
+                Math.min(MAX_INTERVAL_MINUTES, getIntervalMs() / 60_000L));
+        timerButton.setText("⏱️ Tiempo entre preguntas: " + minutes + " min");
+    }
+
+    private void showIntervalDialog() {
+        NumberPicker picker = new NumberPicker(this);
+        picker.setMinValue(MIN_INTERVAL_MINUTES);
+        picker.setMaxValue(MAX_INTERVAL_MINUTES);
+        picker.setValue((int) Math.max(MIN_INTERVAL_MINUTES,
+                Math.min(MAX_INTERVAL_MINUTES, getIntervalMs() / 60_000L)));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(28), dp(4), dp(28), dp(4));
+        box.addView(picker, wrap());
+
+        new AlertDialog.Builder(this)
+                .setTitle("Tiempo entre preguntas")
+                .setMessage("Elige cuántos minutos deben pasar desde la última respuesta hasta la siguiente pregunta.")
+                .setView(box)
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Guardar", (dialog, which) -> {
+                    prefs.edit().putLong("intervalMs", picker.getValue() * 60_000L).apply();
+                    refreshTimerButton();
+                    refreshStatus();
+                })
+                .show();
+    }
+
+    private void requestKeepAliveSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:" + getPackageName())));
+                    return;
+                } catch (Exception ignored) {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                        return;
+                    } catch (Exception ignoredAgain) {
+                    }
+                }
+            }
+        }
+
+        String manufacturer = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase(Locale.ROOT);
+        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco")) {
+            try {
+                Intent autostart = new Intent();
+                autostart.setComponent(new ComponentName(
+                        "com.miui.securitycenter",
+                        "com.miui.permcenter.autostart.AutoStartManagementActivity"));
+                startActivity(autostart);
+                return;
+            } catch (Exception ignored) {
+            }
+        }
+
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Exception ignored) {
+            Toast.makeText(this,
+                    "Activa batería sin restricciones y el inicio automático para Quiz Unlock.",
+                    Toast.LENGTH_LONG).show();
         }
     }
 
@@ -327,7 +422,7 @@ public class MainActivity extends Activity {
         }
 
         Toast.makeText(this,
-                "Quiz activado · pregunta al desbloquear tras 6 minutos",
+                "Quiz activado · pregunta al desbloquear cada " + (getIntervalMs() / 60_000L) + " min",
                 Toast.LENGTH_SHORT).show();
         refreshStatus();
     }
