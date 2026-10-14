@@ -14,11 +14,27 @@ import psycopg
 import pytesseract
 from flask import Flask, flash, redirect, render_template_string, request, session, url_for
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "CAMBIA-ESTA-CLAVE")
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+# Pool mínimo: reutiliza PostgreSQL sin abrir una conexión en cada consulta.
+# Con un único worker, una conexión basta y mantiene bajo el consumo de Render Free.
+DB_POOL = (
+    ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=1,
+        timeout=5,
+        kwargs={"row_factory": dict_row, "connect_timeout": 5},
+        open=True,
+    )
+    if DATABASE_URL
+    else None
+)
 
 # Render puede tener muy poca RAM. Tesseract usa OpenMP y, por defecto,
 # puede abrir varios hilos de trabajo para una sola imagen. Limitarlo a un
@@ -57,22 +73,31 @@ EXAMPLE_IMAGE_DATA_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABggAAAHU
 
 
 def page(body: str, title="Mis preguntas", **ctx):
-    user_name = ctx.pop("user_name", None)
-    template = """<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>'><title>""" + title + """</title><style>""" + CSS + """</style></head><body><main>
-    {% if session.get('user_id') %}<nav><a href='""" + url_for('index') + """'>Inicio</a><a href='""" + url_for('upload') + """'>Añadir</a><a href='""" + url_for('questions') + """'>Guardadas</a><a href='""" + url_for('users') + """'>Cambiar usuario</a></nav>{% endif %}
+    """Renderiza con una plantilla Jinja compilada una sola vez por worker."""
+    global _PAGE_TEMPLATE
+    if _PAGE_TEMPLATE is None:
+        template_source = """<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>'><title>{{ title }}</title><style>""" + CSS + """</style></head><body><main>
+    {% if session.get('user_id') %}<nav><a href='{{ url_for("index") }}'>Inicio</a><a href='{{ url_for("upload") }}'>Añadir</a><a href='{{ url_for("questions") }}'>Guardadas</a><a href='{{ url_for("users") }}'>Cambiar usuario</a></nav>{% endif %}
 
     {% with messages = get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class='flash {{cat}}'>{{msg}}</div>{% endfor %}{% endwith %}
 
-    """ + body + """
+    {{ body|safe }}
 
     </main></body></html>"""
-    return render_template_string(template, **ctx)
+        _PAGE_TEMPLATE = app.jinja_env.from_string(template_source)
+    context = {"body": body, "title": title, **ctx}
+    app.update_template_context(context)
+    return _PAGE_TEMPLATE.render(**context)
+
+
+_PAGE_TEMPLATE = None
 
 
 def db():
-    if not DATABASE_URL:
+    """Devuelve una conexión del pool; al salir del contexto vuelve al pool."""
+    if DB_POOL is None:
         raise RuntimeError("Falta la variable DATABASE_URL.")
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+    return DB_POOL.connection()
 
 
 def init_db():
@@ -785,11 +810,18 @@ def logout():
 @app.route("/")
 def index():
     uid = current_user_id()
-    user_name = current_user_name()
     with db() as c:
-        count = c.execute(
-            "SELECT COUNT(*) AS n FROM questions WHERE user_id=%s", (uid,)
-        ).fetchone()["n"]
+        summary = c.execute(
+            """SELECT u.name, COUNT(q.id) AS n
+               FROM users AS u LEFT JOIN questions AS q ON q.user_id=u.id
+               WHERE u.id=%s GROUP BY u.id, u.name""",
+            (uid,),
+        ).fetchone()
+    if not summary:
+        session.pop("user_id", None)
+        return redirect(url_for("users"))
+    user_name = summary["name"]
+    count = summary["n"]
     body = f"""<section class='card'><span class='badge'>Usuario: {escape(user_name)}</span><h1>Mis preguntas</h1><p class='big'>{count} guardadas</p><div class='actions'>
     <a class='btn primary' href='{url_for('upload')}'>Añadir captura</a><a class='btn' href='{url_for('practice',mode='random')}'>Pregunta aleatoria</a><a class='btn' href='{url_for('practice',mode='all')}'>Hacerlas todas</a></div></section>
     <p class='muted'>Tus preguntas son independientes de las de los demás usuarios.</p>"""
@@ -985,7 +1017,13 @@ def next_question():
     mode = session.get("mode", "random")
     if mode == "all":
         queue = [int(x) for x in session.get("queue", [])]
-        queue = [x for x in queue if get_question(x) is not None]
+        # No comprobar todos los IDs en cada avance: eso generaba N consultas por página.
+        q = None
+        while queue and q is None:
+            qid = queue[0]
+            q = get_question(qid)
+            if q is None:
+                queue.pop(0)  # pregunta borrada desde otra pestaña
         session["queue"] = queue
         if not queue:
             return page(
@@ -997,15 +1035,14 @@ def next_question():
     else:
         uid = current_user_id()
         with db() as c:
-            row = c.execute(
-                "SELECT id FROM questions WHERE user_id=%s ORDER BY RANDOM() LIMIT 1",
+            q = c.execute(
+                "SELECT * FROM questions WHERE user_id=%s ORDER BY RANDOM() LIMIT 1",
                 (uid,),
             ).fetchone()
-        if not row:
+        if not q:
             flash("No hay preguntas guardadas todavía.", "error")
             return redirect(url_for("index"))
-        qid = int(row["id"])
-    q = get_question(qid)
+        qid = int(q["id"])
     options = parse_options(q["options_json"])
     answers = "".join(
         f"<label class='answer'><input type='radio' name='answer' value='{i}' required> <strong>{escape(o['letter'])})</strong> {escape(o['text'])}</label>"
