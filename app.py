@@ -83,7 +83,7 @@ def page(body: str, title="Mis preguntas", **ctx):
 
     {{ body|safe }}
 
-    </main></body></html>"""
+    </main><script defer src='/static/testazo_bridge.js'></script></body></html>"""
         _PAGE_TEMPLATE = app.jinja_env.from_string(template_source)
     context = {"body": body, "title": title, **ctx}
     app.update_template_context(context)
@@ -731,10 +731,49 @@ def get_users():
 
 @app.before_request
 def require_user():
-    allowed = {"users", "select_user", "static"}
+    allowed = {"users", "select_user", "static", "safari_installer"}
     if request.endpoint not in allowed and current_user_id() is None:
         return redirect(url_for("users"))
     return None
+
+
+@app.route("/safari")
+def safari_installer():
+    body = """<section class='card'>
+    <h1>Guardar Testazo con un toque en iPad</h1>
+    <p>Sin instalar apps ni hacer capturas. Configúralo una sola vez desde Safari.</p>
+    <ol style='font-size:17px;line-height:1.8'>
+      <li>Pulsa <strong>Copiar código</strong> aquí abajo.</li>
+      <li>En Safari, toca <strong>Compartir → Añadir a favoritos</strong> para guardar esta página como favorito.</li>
+      <li>Abre Favoritos, mantén pulsado ese favorito y toca <strong>Editar</strong>. Ponle el nombre <strong>Guardar pregunta</strong> y sustituye su dirección por el código copiado (empieza por <code>javascript:</code>).</li>
+      <li>Ve a Testazo y responde una pregunta en modo estudio. Después pulsa <strong>Guardar pregunta</strong> en Favoritos. Se abrirá Mis Preguntas en otra pestaña y se guardará en tu perfil.</li>
+    </ol>
+    <div class='actions'><button type='button' id='copybm' class='btn primary' disabled>Preparando código…</button>
+    <a href='#' id='dragbm' class='btn' style='display:none'>O arrastra este botón a Favoritos</a></div>
+    <p id='copymsg' class='muted' role='status'></p>
+    <p class='muted'>Consejo: Ajustes → Apps → Safari → Mostrar barra de favoritos. Así el botón queda siempre visible mientras haces Testazo.</p>
+    <p class='muted'>Antes de guardar tu primera pregunta, entra en Mis Preguntas y selecciona tu usuario. Si aún no lo has hecho, se te pedirá al enviar la pregunta.</p>
+    </section>
+    <script>
+    (async function () {
+      const btn=document.getElementById('copybm');
+      const msg=document.getElementById('copymsg');
+      try {
+        const res=await fetch('/static/safari_bookmarklet.js');
+        if(!res.ok) throw new Error('No se pudo cargar el código');
+        const code='javascript:'+(await res.text()).trim();
+        const link=document.getElementById('dragbm');
+        link.href=code; link.style.display='inline-block';
+        btn.disabled=false;btn.textContent='Copiar código de Guardar pregunta';
+        btn.addEventListener('click',async()=>{
+          try {await navigator.clipboard.writeText(code);msg.textContent='✓ Copiado. Ahora edita el favorito y pega este código en la dirección.';}
+          catch(_) {msg.textContent='El portapapeles está bloqueado. Mantén pulsado el texto para copiarlo.';
+            const input=document.createElement('textarea');input.value=code;input.style.width='100%';input.rows=4;document.querySelector('.card').appendChild(input);input.focus();input.select();}
+        });
+      }catch(err){btn.textContent='No se pudo preparar: recarga la página';msg.textContent=err.message;}
+    })();
+    </script>"""
+    return page(body, "Guardar preguntas de Testazo en Safari")
 
 
 @app.route("/users")
