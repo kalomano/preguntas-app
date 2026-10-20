@@ -761,7 +761,7 @@ def safari_installer():
       try {
         const res=await fetch('/static/safari_bookmarklet.js');
         if(!res.ok) throw new Error('No se pudo cargar el código');
-        const code='javascript:'+(await res.text()).trim();
+        const code='javascript:'+(await res.text()).replace(/\\s+/g,' ').trim();
         const link=document.getElementById('dragbm');
         link.href=code; link.style.display='inline-block';
         btn.disabled=false;btn.textContent='Copiar código de Guardar pregunta';
