@@ -21,5 +21,18 @@
   if (encoded.length > 22000) return alert('Esta pregunta es demasiado larga para este método.');
   const url = 'https://preguntas-app.onrender.com/users#mp-import=' + encoded;
   const tab = window.open(url, '_blank');
-  if (!tab) alert('Safari ha bloqueado la pestaña nueva. Permite ventanas emergentes y vuelve a pulsar Guardar pregunta.');
+  if (!tab) {
+    let link = document.getElementById('mp-import-fallback');
+    if (!link) {
+      link = document.createElement('a');
+      link.id = 'mp-import-fallback';
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = '↗ Toca aquí para guardar la pregunta';
+      link.style.cssText = 'position:fixed;z-index:2147483647;bottom:40px;right:14px;background:#0f766e;color:#fff;border-radius:12px;padding:16px;font:700 16px system-ui;box-shadow:0 6px 22px #0005';
+      document.body.appendChild(link);
+    }
+    link.href = url;
+    alert('Safari ha bloqueado la nueva pestaña. Pulsa el botón verde que ha aparecido en Testazo.');
+  }
 })()
