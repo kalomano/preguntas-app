@@ -83,7 +83,7 @@ def page(body: str, title="Mis preguntas", **ctx):
 
     {{ body|safe }}
 
-    </main><script defer src='/static/testazo_bridge.js'></script></body></html>"""
+    </main>{% if request.endpoint in ('users', 'index') %}<script defer src='/static/testazo_bridge.js'></script>{% endif %}</body></html>"""
         _PAGE_TEMPLATE = app.jinja_env.from_string(template_source)
     context = {"body": body, "title": title, **ctx}
     app.update_template_context(context)
