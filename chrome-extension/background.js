@@ -28,6 +28,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   const key = pendingKey(appTabId);
   chrome.storage.session.get(key, result => {
     const sourceTabId = result[key];
+    if (sourceTabId === undefined) return;
     chrome.storage.session.remove(key);
     if (message.success) {
       chrome.tabs.remove(appTabId);
