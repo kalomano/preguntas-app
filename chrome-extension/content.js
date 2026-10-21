@@ -118,43 +118,92 @@
       box = document.createElement('div');
       box.id = BUTTON_ID + '-status';
       box.setAttribute('role', 'status');
-      box.style.cssText = 'position:fixed;z-index:2147483647;right:18px;bottom:76px;max-width:360px;padding:12px 16px;border-radius:10px;color:#fff;background:#166534;box-shadow:0 4px 18px #0004;font:600 14px/1.4 system-ui,sans-serif;';
+      box.style.cssText = 'position:fixed;z-index:2147483647;right:18px;bottom:18px;max-width:360px;padding:10px 14px;border-radius:10px;color:#fff;background:#166534;box-shadow:0 4px 18px #0004;font:600 14px/1.4 system-ui,sans-serif;';
       document.body.appendChild(box);
     }
     box.style.background = error ? '#991b1b' : '#166534';
     box.textContent = message;
-    setTimeout(() => box.remove(), 6500);
+    setTimeout(() => box.remove(), 5000);
+  }
+
+  function saveAnchor() {
+    return document.querySelector('#btn-save-question')
+      || document.querySelector('.report-wrapper button')
+      || document.querySelector('.navigation-container .btn-report-icon');
   }
 
   function addButton() {
-    if (!document.body || document.getElementById(BUTTON_ID)) return;
-    const button = document.createElement('button');
-    button.id = BUTTON_ID;
-    button.type = 'button';
-    button.textContent = 'Guardar en Mis Preguntas';
-    button.title = 'Guarda esta pregunta corregida, su tema y enlace';
-    button.setAttribute('aria-label', 'Guardar pregunta de Testazo o Bombea en Mis Preguntas');
-    button.style.cssText = 'position:fixed;z-index:2147483646;right:18px;bottom:18px;padding:12px 18px;border:0;border-radius:12px;background:#0f766e;color:white;font:700 15px system-ui,sans-serif;box-shadow:0 4px 18px #0004;cursor:pointer;';
-    button.addEventListener('click', () => {
-      try {
-        const data = extract();
-        const encoded = encodeURIComponent(JSON.stringify(data));
-        if (encoded.length > MAX_IMPORT_LENGTH) {
-          throw new Error('Esta pregunta es demasiado larga para importarla.');
-        }
-        chrome.runtime.sendMessage({
-          type: 'open-import',
-          url: APP_URL + '#mp-import=' + encoded
-        });
-        notify(data.topic_hint
-          ? 'Abriendo Mis Preguntas · ' + data.topic_hint
-          : 'Abriendo Mis Preguntas · Sin tema detectado');
-      } catch (error) {
-        notify(error.message || 'No se pudo preparar la pregunta.', true);
+    const anchor = saveAnchor();
+    if (!document.body || !anchor) return;
+
+    let button = document.getElementById(BUTTON_ID);
+    if (!button) {
+      button = document.createElement('button');
+      button.id = BUTTON_ID;
+      button.type = 'button';
+      button.title = 'Guardar esta pregunta en Mis Preguntas';
+      button.setAttribute('aria-label', 'Guardar pregunta en Mis Preguntas');
+      button.style.cssText = 'margin-left:8px;cursor:pointer;';
+
+      if (anchor.id === 'btn-save-question') {
+        button.className = anchor.className;
+        button.innerHTML = '<i class="fas fa-bookmark" aria-hidden="true"></i>';
+      } else {
+        button.className = anchor.className;
+        button.textContent = 'Guardar';
       }
-    });
-    document.body.appendChild(button);
+
+      button.dataset.originalHtml = button.innerHTML;
+      button.dataset.originalText = button.textContent;
+      button.addEventListener('click', () => {
+        try {
+          const data = extract();
+          const encoded = encodeURIComponent(JSON.stringify(data));
+          if (encoded.length > MAX_IMPORT_LENGTH) {
+            throw new Error('Esta pregunta es demasiado larga para importarla.');
+          }
+          button.disabled = true;
+          button.dataset.originalTitle = button.title;
+          button.title = 'Guardando en Mis Preguntas…';
+          chrome.runtime.sendMessage({
+            type: 'open-import',
+            url: APP_URL + '#mp-import=' + encoded
+          }, () => {
+            if (chrome.runtime.lastError) {
+              button.disabled = false;
+              notify('No se pudo iniciar el guardado.', true);
+            }
+          });
+          notify('Guardando en Mis Preguntas…');
+        } catch (error) {
+          notify(error.message || 'No se pudo preparar la pregunta.', true);
+        }
+      });
+      document.body.appendChild(button);
+    }
+
+    if (button.previousElementSibling !== anchor) {
+      anchor.insertAdjacentElement('afterend', button);
+    }
   }
+
+  chrome.runtime.onMessage.addListener(message => {
+    if (message?.type !== 'save-result') return;
+    const button = document.getElementById(BUTTON_ID);
+    if (!button) return;
+    button.disabled = false;
+    button.title = button.dataset.originalTitle || 'Guardar esta pregunta en Mis Preguntas';
+    if (message.success) {
+      button.innerHTML = '✓';
+      button.setAttribute('aria-label', 'Pregunta guardada en Mis Preguntas');
+      setTimeout(() => {
+        button.innerHTML = button.dataset.originalHtml;
+        button.setAttribute('aria-label', 'Guardar pregunta en Mis Preguntas');
+      }, 2500);
+    } else {
+      notify('No se pudo guardar. Revisa la pestaña de Mis Preguntas.', true);
+    }
+  });
 
   addButton();
   new MutationObserver(addButton).observe(document.documentElement, {
