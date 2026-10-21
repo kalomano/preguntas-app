@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import secrets
 import tempfile
 from html import escape
 
@@ -13,6 +14,7 @@ import numpy as np
 import psycopg
 import pytesseract
 from flask import Flask, flash, redirect, render_template_string, request, session, url_for
+from topics import TOPICS, migrate_topics, parse_topic, topic_filter, topic_select
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -137,6 +139,7 @@ def init_db():
             END IF;
         END $$""")
         c.execute("CREATE INDEX IF NOT EXISTS questions_user_id_idx ON questions(user_id)")
+        migrate_topics(c)
 
 
 def current_user_id():
@@ -701,11 +704,12 @@ def all_ids():
     uid = current_user_id()
     if uid is None:
         return []
+    clause, params = topic_filter(session.get("practice_topic", ""))
     with db() as c:
         ids = [
             int(r["id"])
             for r in c.execute(
-                "SELECT id FROM questions WHERE user_id=%s", (uid,)
+                "SELECT id FROM questions WHERE user_id=%s" + clause, (uid,) + params
             ).fetchall()
         ]
     random.shuffle(ids)
@@ -864,6 +868,11 @@ def index():
     body = f"""<section class='card'><span class='badge'>Usuario: {escape(user_name)}</span><h1>Mis preguntas</h1><p class='big'>{count} guardadas</p><div class='actions'>
     <a class='btn primary' href='{url_for('upload')}'>Añadir captura</a><a class='btn' href='{url_for('practice',mode='random')}'>Pregunta aleatoria</a><a class='btn' href='{url_for('practice',mode='all')}'>Hacerlas todas</a></div></section>
     <p class='muted'>Tus preguntas son independientes de las de los demás usuarios.</p>"""
+    body += f"""<details class='card'><summary>Practicar por tema (opcional)</summary>
+    <form method='get' action='{url_for("practice")}'>
+    <p><label>Tema: {topic_select(name="topic", include_all=True)}</label></p>
+    <label>Modo: <select name='mode'><option value='random'>Aleatoria</option><option value='all'>Todas</option></select></label>
+    <button class='btn' type='submit'>Practicar</button></form></details>"""
     return page(body)
 
 
@@ -1000,6 +1009,7 @@ def upload():
         <input type='hidden' name='question' value='{escape(question)}'>
         <input type='hidden' name='options_json' value='{escape(options_json_str)}'>
         <input type='hidden' name='correct_index' value='{correct}'>
+        <p><label>Tema (opcional): {topic_select()}</label></p>
         <div class='actions'>
             <button class='btn primary' type='submit'>✅ Confirmar y Guardar</button>
             <a class='btn danger' href='{url_for("upload")}'>❌ Descartar y reintentar</a>
@@ -1011,6 +1021,11 @@ def upload():
 
 @app.post("/confirm-save")
 def confirm_save():
+    try:
+        topic_id = parse_topic(request.form.get("topic_id"))
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("upload"))
     question = clean(request.form.get("question", ""))
     options_json = request.form.get("options_json", "[]")
     try:
@@ -1028,8 +1043,8 @@ def confirm_save():
             flash("Esa pregunta ya estaba guardada para este usuario.", "error")
             return redirect(url_for("index"))
         c.execute(
-            "INSERT INTO questions(question,options_json,correct_index,user_id) VALUES(%s,%s,%s,%s)",
-            (question, json.dumps(options, ensure_ascii=False), correct, uid),
+            "INSERT INTO questions(question,options_json,correct_index,user_id,topic_id) VALUES(%s,%s,%s,%s,%s)",
+            (question, json.dumps(options, ensure_ascii=False), correct, uid, topic_id),
         )
     flash(
         f"Guardada correctamente. Respuesta correcta: {options[correct]['letter']}) {options[correct]['text']}",
@@ -1043,6 +1058,13 @@ def practice():
     mode = request.args.get("mode", "random")
     if mode not in {"random", "all"}:
         mode = "random"
+    topic = request.args.get("topic", "")
+    try:
+        topic_filter(topic)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("index"))
+    session["practice_topic"] = topic
     session["mode"] = mode
     if mode == "all":
         session["queue"] = all_ids()
@@ -1067,19 +1089,20 @@ def next_question():
         if not queue:
             return page(
                 "<section class='card'><h1>Has terminado</h1><p>No quedan preguntas en esta tanda.</p><a class='btn primary' href='"
-                + url_for("practice", mode="all")
+                + url_for("practice", mode="all", topic=session.get("practice_topic", ""))
                 + "'>Repetir todas</a></section>"
             )
         qid = queue[0]
     else:
         uid = current_user_id()
+        clause, params = topic_filter(session.get("practice_topic", ""))
         with db() as c:
             q = c.execute(
-                "SELECT * FROM questions WHERE user_id=%s ORDER BY RANDOM() LIMIT 1",
-                (uid,),
+                "SELECT * FROM questions WHERE user_id=%s" + clause + " ORDER BY RANDOM() LIMIT 1",
+                (uid,) + params,
             ).fetchone()
         if not q:
-            flash("No hay preguntas guardadas todavía.", "error")
+            flash("No hay preguntas para esta selección. Puedes probar con Todos.", "error")
             return redirect(url_for("index"))
         qid = int(q["id"])
     options = parse_options(q["options_json"])
@@ -1150,6 +1173,26 @@ def delete(qid):
     return redirect(url_for("next_question"))
 
 
+@app.post("/questions/<int:qid>/topic")
+def update_question_topic(qid):
+    token = session.get("topic_csrf")
+    if not token or not secrets.compare_digest(token, request.form.get("csrf_token", "")):
+        return "Formulario caducado. Vuelve a Guardadas.", 400
+    try:
+        topic_id = parse_topic(request.form.get("topic_id"))
+    except ValueError as exc:
+        return str(exc), 400
+    with db() as c:
+        result = c.execute(
+            "UPDATE questions SET topic_id=%s WHERE id=%s AND user_id=%s",
+            (topic_id, qid, current_user_id()),
+        )
+        if not result.rowcount:
+            return "Pregunta no encontrada.", 404
+    flash("Tema actualizado.", "success")
+    return redirect(url_for("questions"))
+
+
 @app.route("/questions")
 def questions():
     uid = current_user_id()
@@ -1161,6 +1204,17 @@ def questions():
         return page(
             "<section class='card'><h1>Guardadas</h1><p>No hay preguntas todavía para este usuario.</p></section>"
         )
+    token = session.setdefault("topic_csrf", secrets.token_hex(24))
+    counts = {None: 0, **dict.fromkeys(TOPICS, 0)}
+    for q in rows:
+        counts[q["topic_id"]] += 1
+    stats = "".join(
+        f"<tr><td>{escape(TOPICS.get(topic_id, 'Sin tema'))}</td><td style='text-align:right'>{count}</td></tr>"
+        for topic_id, count in sorted(counts.items(), key=lambda item: (-item[1], item[0] or 0))
+    )
+    stats = ("<details><summary>Preguntas por tema</summary><table style='width:100%'>"
+             "<thead><tr><th style='text-align:left'>Tema</th><th>Guardadas</th></tr></thead><tbody>"
+             + stats + "</tbody></table></details>")
     items = []
     for q in rows:
         opts = parse_options(q["options_json"])
@@ -1169,12 +1223,18 @@ def questions():
             f"""<article class='item'>
             <h3>{escape(q['question'])}</h3>
             <p>Correcta: <strong>{escape(ok['letter'])}) {escape(ok['text'])}</strong></p>
-            <form method='post' action='{url_for('delete', qid=q['id'])}' onsubmit='return confirm("¿Eliminar definitivamente esta pregunta?")'>
+            <details><summary>Tema: {escape(TOPICS.get(q['topic_id'], 'Sin tema'))}</summary>
+            <form method='post' action='{url_for("update_question_topic", qid=q["id"])}'>
+                <input type='hidden' name='csrf_token' value='{token}'>
+                <p><label>Tema (opcional): {topic_select(q['topic_id'])}</label></p>
+                <button class='btn' type='submit'>Guardar tema</button>
+            </form></details>
+            <form method='post' action='{url_for('delete', qid=q['id'])}'  onsubmit='return confirm("¿Eliminar definitivamente esta pregunta?")'>
                 <button class='btn danger' type='submit' style='padding:6px 12px;font-size:14px;margin-top:8px;'>🗑️ Eliminar</button>
             </form>
         </article>"""
         )
-    return page("<section class='card'><h1>Guardadas</h1>" + "".join(items) + "</section>")
+    return page("<section class='card'><h1>Guardadas</h1>" + stats + "".join(items) + "</section>")
 
 
 @app.errorhandler(413)
