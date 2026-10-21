@@ -198,7 +198,6 @@
       button.setAttribute('aria-label', 'Pregunta guardada en Mis Preguntas');
       setTimeout(() => {
         button.innerHTML = button.dataset.originalHtml;
-        button.textContent = button.dataset.originalText;
         button.setAttribute('aria-label', 'Guardar pregunta en Mis Preguntas');
       }, 2500);
     } else {
