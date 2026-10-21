@@ -1,0 +1,30 @@
+name: Flask topic tests
+on:
+  pull_request:
+    paths: ['app.py', 'topics.py', 'test_topics.py', 'requirements.txt', '.github/workflows/test-topics.yml']
+  push:
+    branches: [main]
+    paths: ['app.py', 'topics.py', 'test_topics.py', 'requirements.txt', '.github/workflows/test-topics.yml']
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: preguntas_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements.txt
+      - run: python -m unittest -v test_topics
+      - run: python -m unittest -v test_topics
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/preguntas_test
