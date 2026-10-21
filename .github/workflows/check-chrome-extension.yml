@@ -1,0 +1,25 @@
+name: Check Chrome extension
+
+on:
+  pull_request:
+    paths:
+      - "chrome-extension/**"
+      - ".github/workflows/check-chrome-extension.yml"
+  push:
+    branches: [main]
+    paths:
+      - "chrome-extension/**"
+      - ".github/workflows/check-chrome-extension.yml"
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check chrome-extension/background.js
+      - run: node --check chrome-extension/content.js
+      - name: Validate manifest JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('chrome-extension/manifest.json', 'utf8'))"
