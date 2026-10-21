@@ -5,18 +5,18 @@
   const APP_URL = 'https://preguntas-app.onrender.com/';
   const MAX_IMPORT_LENGTH = 21000;
 
-  const clean = value => String(value || '').replace(/\\s+/g, ' ').trim();
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
   const text = node => clean(node?.textContent);
   const TOPIC_ALIASES = [
-    [/^decreto legislativo 1\\s*\\/\\s*2006\\b/i, 'Tema 04. DL 1 2006.pdf'],
-    [/^dl\\s*1\\s*\\/\\s*2006\\b/i, 'Tema 04. DL 1 2006.pdf'],
-    [/^soporte vital b[aá]sico\\s*2\\b/i, 'Tema 13. SVB II.pdf'],
-    [/^svb\\s*ii\\b/i, 'Tema 13. SVB II.pdf'],
-    [/^svb\\s*i\\b/i, 'Tema 12. SVB I (trampeado de Cecop).pdf']
+    [/^decreto legislativo 1\s*\/\s*2006\b/i, 'Tema 04. DL 1 2006.pdf'],
+    [/^dl\s*1\s*\/\s*2006\b/i, 'Tema 04. DL 1 2006.pdf'],
+    [/^soporte vital b[aá]sico\s*2\b/i, 'Tema 13. SVB II.pdf'],
+    [/^svb\s*ii\b/i, 'Tema 13. SVB II.pdf'],
+    [/^svb\s*i\b/i, 'Tema 12. SVB I (trampeado de Cecop).pdf']
   ];
 
   function topicFrom(raw) {
-    const value = clean(raw).replace(/[–—-]+\\s*$/, '').trim();
+    const value = clean(raw).replace(/[–—-]+\s*$/, '').trim();
     if (!value) return '';
     for (const [pattern, label] of TOPIC_ALIASES) {
       if (pattern.test(value)) return label;
@@ -30,7 +30,7 @@
     );
     if (explicit) return topicFrom(text(explicit));
     const q = text(questionNode);
-    const prefix = q.match(/^(.{3,180}?)\\s+(?:-|–|—)\\s+/);
+    const prefix = q.match(/^(.{3,180}?)\s+(?:-|–|—)\s+/);
     return prefix ? topicFrom(prefix[1]) : '';
   }
 
@@ -43,9 +43,14 @@
   function optionNodes() {
     const container = document.querySelector('#optionsContainer, [data-options], .options');
     if (!container) return [];
-    return Array.from(container.querySelectorAll(
-      'button.option, [role="option"], .option, .texto-opcion'
-    )).filter(node => text(node)).slice(0, 4);
+    let nodes = Array.from(container.querySelectorAll(
+      'button.option, [role="option"], .option'
+    ));
+    if (nodes.length !== 4) {
+      nodes = Array.from(container.querySelectorAll('.texto-opcion, [data-option]'));
+    }
+    nodes = nodes.map(node => node.closest('.option') || node);
+    return Array.from(new Set(nodes)).filter(node => text(node)).slice(0, 4);
   }
 
   function correctAnswerText() {
@@ -54,7 +59,7 @@
     ));
     for (const node of nodes) {
       const value = text(node);
-      const match = value.match(/respuesta correcta\\s*:\s*(.+)$/i);
+      const match = value.match(/respuesta correcta\s*:\s*(.+)$/i);
       if (match) return clean(match[1]);
       if (node.matches('[data-correct-answer]')) {
         return clean(node.getAttribute('data-correct-answer'));
