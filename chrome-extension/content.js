@@ -143,15 +143,12 @@
       button.type = 'button';
       button.title = 'Guardar esta pregunta en Mis Preguntas';
       button.setAttribute('aria-label', 'Guardar pregunta en Mis Preguntas');
-      button.style.cssText = 'margin-left:8px;cursor:pointer;';
-
-      if (anchor.id === 'btn-save-question') {
-        button.className = anchor.className;
-        button.innerHTML = '<i class="fas fa-bookmark" aria-hidden="true"></i>';
-      } else {
-        button.className = anchor.className;
-        button.textContent = 'Guardar';
-      }
+      const isBombeaControl = anchor.id === 'btn-save-question';
+      button.className = anchor.className;
+      button.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4.75A1.75 1.75 0 0 1 7.75 3h8.5A1.75 1.75 0 0 1 18 4.75V21l-6-3.5L6 21z"></path><path d="M12 7v6m-3-3h6"></path></svg>';
+      button.style.cssText = isBombeaControl
+        ? 'display:inline-flex!important;align-items:center!important;justify-content:center!important;width:44px!important;min-width:44px!important;height:44px!important;flex:0 0 44px!important;padding:0!important;margin:0 0 0 8px!important;position:relative!important;visibility:visible!important;opacity:1!important;cursor:pointer!important;z-index:2!important;box-sizing:border-box!important;'
+        : 'display:inline-flex!important;align-items:center!important;justify-content:center!important;width:38px!important;min-width:38px!important;height:38px!important;flex:0 0 38px!important;padding:0!important;margin:0 0 0 8px!important;border:1px solid #e5e7eb!important;border-radius:8px!important;background:#f5f5f7!important;color:#4b5563!important;position:relative!important;visibility:visible!important;opacity:1!important;cursor:pointer!important;z-index:2!important;box-sizing:border-box!important;';
 
       button.dataset.originalHtml = button.innerHTML;
       button.dataset.originalText = button.textContent;
