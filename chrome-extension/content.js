@@ -127,15 +127,12 @@
 
   function addButton() {
     if (!document.body || document.getElementById(BUTTON_ID)) return;
-    const q = questionNode();
-    const options = optionNodes();
-    if (!q || options.length !== 4) return;
-
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
     button.textContent = 'Guardar en Mis Preguntas';
     button.title = 'Guarda esta pregunta corregida, su tema y enlace';
+    button.setAttribute('aria-label', 'Guardar pregunta de Testazo o Bombea en Mis Preguntas');
     button.style.cssText = 'position:fixed;z-index:2147483646;right:18px;bottom:18px;padding:12px 18px;border:0;border-radius:12px;background:#0f766e;color:white;font:700 15px system-ui,sans-serif;box-shadow:0 4px 18px #0004;cursor:pointer;';
     button.addEventListener('click', () => {
       try {
