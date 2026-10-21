@@ -8,7 +8,7 @@
     if (reported) return;
     const notice = document.getElementById(NOTICE_ID);
     if (!notice) return;
-    const message = (notice.textContent || '').replace(/\\s+/g, ' ').trim();
+    const message = (notice.textContent || '').replace(/\s+/g, ' ').trim();
     let success = false;
 
     if (/^✓ (?:Pregunta guardada|Esa pregunta ya estaba guardada)/i.test(message)) {
