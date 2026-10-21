@@ -153,6 +153,8 @@
         button.textContent = 'Guardar';
       }
 
+      button.dataset.originalHtml = button.innerHTML;
+      button.dataset.originalText = button.textContent;
       button.addEventListener('click', () => {
         try {
           const data = extract();
@@ -192,9 +194,13 @@
     button.disabled = false;
     button.title = button.dataset.originalTitle || 'Guardar esta pregunta en Mis Preguntas';
     if (message.success) {
-      button.textContent = '✓ Guardada';
+      button.innerHTML = '✓';
       button.setAttribute('aria-label', 'Pregunta guardada en Mis Preguntas');
-      setTimeout(addButton, 2500);
+      setTimeout(() => {
+        button.innerHTML = button.dataset.originalHtml;
+        button.textContent = button.dataset.originalText;
+        button.setAttribute('aria-label', 'Guardar pregunta en Mis Preguntas');
+      }, 2500);
     } else {
       notify('No se pudo guardar. Revisa la pestaña de Mis Preguntas.', true);
     }
