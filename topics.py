@@ -56,7 +56,7 @@ TOPIC_ALIASES = {
     10: ("mecanica basica",),
     11: ("comunicaciones",),
     12: ("svb i trampeado de cecop", "svb 1 trampeado de cecop"),
-    13: ("svb ii", "svb 2"),
+    13: ("svb ii", "svb 2", "soporte vital basico 2 instrumentalizar svb"),
     14: ("psicologia para intervinientes",),
     15: ("hidraulica",),
     16: ("naturaleza del fuego metodos de extincion y agentes extintores",),
