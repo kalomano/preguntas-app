@@ -10,9 +10,9 @@ Extensión separada para guardar una pregunta corregida de Testazo o Bombea en
 3. Pulsa **Cargar descomprimida** y elige la carpeta `chrome-extension`.
 4. Entra en Mis Preguntas y selecciona tu usuario. Después abre Testazo o Bombea.
 
-No requiere claves ni permisos para leer el contenido de otras páginas. Solo se activa
-en `app.testazo.com` y `bombea.madrid`. El botón nuevo es independiente: no sustituye
-ni modifica botones de favoritos que ya existan.
+La extensión solo se activa en Testazo, Bombea y Mis Preguntas para guardar la pregunta.
+El botón se integra junto a los controles de cada web y no sustituye ni modifica los
+botones de favoritos existentes.
 
 ## Uso
 
