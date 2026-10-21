@@ -5,7 +5,8 @@
   "description": "Guarda una pregunta corregida de Testazo o Bombea en Mis Preguntas, con tema detectado y enlace de origen.",
   "permissions": [],
   "host_permissions": [
-    "https://app.testazo.com/*",
+    "https://*.testazo.com/*",
+    "https://testazo.com/*",
     "https://bombea.madrid/*"
   ],
   "background": {
@@ -14,7 +15,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://app.testazo.com/*",
+        "https://*.testazo.com/*",
+        "https://testazo.com/*",
         "https://bombea.madrid/*"
       ],
       "js": ["content.js"],
