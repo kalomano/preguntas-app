@@ -55,7 +55,7 @@
 
   function correctAnswerText() {
     const nodes = Array.from(document.querySelectorAll(
-      '#moreOptionsPopup p, [class*="respuesta"], [data-correct-answer]'
+      '#moreOptionsPopup p, #comentariosPopup .explicacion-pregunta-body p.fuente, [class*="respuesta"], [data-correct-answer]'
     ));
     for (const node of nodes) {
       const value = text(node);
