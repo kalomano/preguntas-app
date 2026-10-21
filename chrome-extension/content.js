@@ -77,7 +77,7 @@
 
     let texts = candidates.map(node => text(node).replace(/^[a-d][).]\s*/i, ''));
     const prefixNode = question.querySelector('.question-tema-prefix');
-    let prompt = text(question).replace(/^\d+\\.\s*/, '');
+    let prompt = text(question).replace(/^\d+\.\s*/, '');
     if (prefixNode) prompt = clean(prompt.slice(text(prefixNode).length));
     if (!prompt) throw new Error('La pregunta aparece vacía.');
 
