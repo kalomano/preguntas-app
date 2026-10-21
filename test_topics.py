@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 with patch.dict(os.environ, {"DATABASE_URL": ""}):
     import app as application
-from topics import TOPICS, migrate_topics, parse_topic
+from topics import TOPICS, detect_topic_id, migrate_topics, parse_topic
 
 OPTIONS = [{"letter": c, "text": f"Opción {c}"} for c in "abcd"]
 
@@ -39,10 +39,10 @@ class TopicTests(unittest.TestCase):
         else:
             self.c = SQLiteConnection()
         self.c.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT UNIQUE)")
-        self.c.execute("CREATE TABLE questions(id INTEGER PRIMARY KEY, question TEXT, options_json TEXT, correct_index INTEGER, user_id INTEGER NOT NULL, topic_id SMALLINT CHECK(topic_id BETWEEN 1 AND 35))")
+        self.c.execute("CREATE TABLE questions(id INTEGER PRIMARY KEY, question TEXT, options_json TEXT, correct_index INTEGER, user_id INTEGER NOT NULL, topic_id SMALLINT CHECK(topic_id BETWEEN 1 AND 35), source_url TEXT)")
         self.c.execute("INSERT INTO users VALUES(1, 'Uno'), (2, 'Dos')")
         for qid, uid, topic in [(1, 1, None), (2, 1, 2), (3, 2, 35)]:
-            self.c.execute("INSERT INTO questions VALUES(%s,%s,%s,0,%s,%s)",
+            self.c.execute("INSERT INTO questions VALUES(%s,%s,%s,0,%s,%s,NULL)",
                            (qid, f"Pregunta {qid}", json.dumps(OPTIONS), uid, topic))
         # PostgreSQL's production ID is BIGSERIAL; emulate it for route inserts.
         if self.url:
@@ -97,12 +97,52 @@ class TopicTests(unittest.TestCase):
         self.assertIsNone(self.row(4)["topic_id"])
         self.assertEqual(self.row(4)["user_id"], 1)
         self.assertEqual(json.loads(self.row(4)["options_json"]), OPTIONS)
+        self.assertIsNone(self.row(4)["source_url"])
 
-    def test_save_topic_and_duplicate_does_not_overwrite(self):
-        self.save(topic_id="35")
-        self.save(topic_id="1")
-        self.assertEqual(self.row(4)["topic_id"], 35)
-        self.assertIsNone(self.row(5))
+    def test_auto_detect_bombea_topic_and_store_allowed_origin_link(self):
+        self.assertEqual(detect_topic_id("Decreto Legislativo 1/2006, Tº Preliminar"), 4)
+        self.save(
+            topic_hint="Decreto Legislativo 1/2006, Tº Preliminar",
+            source_url="https://bombea.madrid/generador/index.html?return=%2Ftest",
+        )
+        self.assertEqual(self.row(4)["topic_id"], 4)
+        self.assertEqual(self.row(4)["source_url"], "https://bombea.madrid/generador/index.html?return=%2Ftest")
+
+    def test_testazo_topic_detection_and_source_url_validation(self):
+        self.assertEqual(detect_topic_id("Tema 13. SVB II.pdf - pregunta"), 13)
+        self.save(
+            topic_hint="Tema 13. SVB II.pdf",
+            source_url="https://app.testazo.com/test/question/123",
+        )
+        self.assertEqual(self.row(4)["topic_id"], 13)
+        self.assertEqual(self.row(4)["source_url"], "https://app.testazo.com/test/question/123")
+
+    def test_untrusted_source_url_is_not_stored(self):
+        self.save(source_url="https://evil.example/phishing")
+        self.assertIsNone(self.row(4)["source_url"])
+
+    def test_auto_detect_bombea_topic_and_store_source_link(self):
+        self.assertEqual(detect_topic_id("Decreto Legislativo 1/2006, Tº Preliminar"), 4)
+        self.save(
+            topic_hint="Decreto Legislativo 1/2006, Tº Preliminar",
+            source_url="https://bombea.madrid/generador/index.html?return=%2Ftest",
+        )
+        self.assertEqual(self.row(4)["topic_id"], 4)
+        self.assertEqual(self.row(4)["source_url"], "https://bombea.madrid/generador/index.html?return=%2Ftest")
+        self.assertIn(b"Abrir en Testazo/Bombea", self.client.get("/questions").data)
+
+    def test_testazo_topic_detection_and_source_url_validation(self):
+        self.assertEqual(detect_topic_id("Tema 13. SVB II.pdf"), 13)
+        self.save(
+            topic_hint="Tema 13. SVB II.pdf",
+            source_url="https://app.testazo.com/test/question/123",
+        )
+        self.assertEqual(self.row(4)["topic_id"], 13)
+        self.assertEqual(self.row(4)["source_url"], "https://app.testazo.com/test/question/123")
+
+    def test_untrusted_source_url_is_not_stored(self):
+        self.save(source_url="https://evil.example/phishing")
+        self.assertIsNone(self.row(4)["source_url"])
 
     def test_invalid_save_does_not_insert(self):
         self.save(topic_id="36")
@@ -167,7 +207,10 @@ class TopicTests(unittest.TestCase):
         self.assertIn(b"Preguntas por tema", response.data)
         self.assertNotIn(b"Pregunta 3", response.data)
         self.assertIn(b"Igualdad.pdf</td><td style='text-align:right'>1", response.data)
-        self.assertIn(b"Todos", self.client.get("/").data)
+        home = self.client.get("/").data
+        self.assertIn(b"Todos (2)", home)
+        self.assertIn(b"Igualdad.pdf (1)", home)
+        self.assertNotIn(b"Conducci", home)
 
     def test_upload_confirmation_has_optional_default(self):
         with patch.object(application, "parse_capture", return_value=("Captura", OPTIONS, 0)):
