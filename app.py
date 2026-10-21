@@ -8,13 +8,14 @@ import re
 import secrets
 import tempfile
 from html import escape
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
 import psycopg
 import pytesseract
 from flask import Flask, flash, redirect, render_template_string, request, session, url_for
-from topics import TOPICS, migrate_topics, parse_topic, topic_filter, topic_select
+from topics import TOPICS, detect_topic_id, migrate_topics, parse_topic, topic_filter, topic_select
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -163,6 +164,21 @@ def current_user_name():
 
 def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("\u00a0", " ")).strip()
+
+
+def safe_source_url(value):
+    value = clean(value or "")
+    if not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or parsed.hostname not in {"app.testazo.com", "bombea.madrid"}:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    return value
 
 
 def _limit_ocr_size(image, max_width=1000):
@@ -860,6 +876,12 @@ def index():
                WHERE u.id=%s GROUP BY u.id, u.name""",
             (uid,),
         ).fetchone()
+        topic_counts = {None: 0, **dict.fromkeys(TOPICS, 0)}
+        for row in c.execute(
+            "SELECT topic_id, COUNT(*) AS n FROM questions WHERE user_id=%s GROUP BY topic_id",
+            (uid,),
+        ).fetchall():
+            topic_counts[row["topic_id"]] = int(row["n"])
     if not summary:
         session.pop("user_id", None)
         return redirect(url_for("users"))
@@ -870,7 +892,7 @@ def index():
     <p class='muted'>Tus preguntas son independientes de las de los demás usuarios.</p>"""
     body += f"""<details class='card'><summary>Practicar por tema (opcional)</summary>
     <form method='get' action='{url_for("practice")}'>
-    <p><label>Tema: {topic_select(name="topic", include_all=True)}</label></p>
+    <p><label>Tema: {topic_select(name="topic", counts=topic_counts)}</label></p>
     <label>Modo: <select name='mode'><option value='random'>Aleatoria</option><option value='all'>Todas</option></select></label>
     <button class='btn' type='submit'>Practicar</button></form></details>"""
     return page(body)
@@ -1027,6 +1049,14 @@ def confirm_save():
         flash(str(exc), "error")
         return redirect(url_for("upload"))
     question = clean(request.form.get("question", ""))
+    if topic_id is None:
+        topic_id = detect_topic_id(request.form.get("topic_hint"))
+        if topic_id is None:
+            parts = re.split(r"\s+[—–-]\s+", question, maxsplit=1)
+            topic_id = detect_topic_id(parts[0])
+            if topic_id is not None and len(parts) == 2:
+                question = clean(parts[1])
+    source_url = safe_source_url(request.form.get("source_url") or request.referrer)
     options_json = request.form.get("options_json", "[]")
     try:
         correct = int(request.form.get("correct_index", "0"))
@@ -1043,8 +1073,8 @@ def confirm_save():
             flash("Esa pregunta ya estaba guardada para este usuario.", "error")
             return redirect(url_for("index"))
         c.execute(
-            "INSERT INTO questions(question,options_json,correct_index,user_id,topic_id) VALUES(%s,%s,%s,%s,%s)",
-            (question, json.dumps(options, ensure_ascii=False), correct, uid, topic_id),
+            "INSERT INTO questions(question,options_json,correct_index,user_id,topic_id,source_url) VALUES(%s,%s,%s,%s,%s,%s)",
+            (question, json.dumps(options, ensure_ascii=False), correct, uid, topic_id, source_url),
         )
     flash(
         f"Guardada correctamente. Respuesta correcta: {options[correct]['letter']}) {options[correct]['text']}",
@@ -1219,10 +1249,17 @@ def questions():
     for q in rows:
         opts = parse_options(q["options_json"])
         ok = opts[int(q["correct_index"])]
+        source_url = q["source_url"]
+        source_link = (
+            '<p>Origen: <a href="' + escape(source_url)
+            + '" target="_blank" rel="noopener noreferrer">Abrir en Testazo/Bombea</a></p>'
+            if source_url else ""
+        )
         items.append(
             f"""<article class='item'>
             <h3>{escape(q['question'])}</h3>
             <p>Correcta: <strong>{escape(ok['letter'])}) {escape(ok['text'])}</strong></p>
+            {source_link}
             <details><summary>Tema: {escape(TOPICS.get(q['topic_id'], 'Sin tema'))}</summary>
             <form method='post' action='{url_for("update_question_topic", qid=q["id"])}'>
                 <input type='hidden' name='csrf_token' value='{token}'>
