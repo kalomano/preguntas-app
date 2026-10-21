@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Mis Preguntas — Guardar desde Testazo y Bombea",
+  "version": "1.0.0",
+  "description": "Guarda una pregunta corregida de Testazo o Bombea en Mis Preguntas, con tema detectado y enlace de origen.",
+  "permissions": [],
+  "host_permissions": [
+    "https://app.testazo.com/*",
+    "https://bombea.madrid/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://app.testazo.com/*",
+        "https://bombea.madrid/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
