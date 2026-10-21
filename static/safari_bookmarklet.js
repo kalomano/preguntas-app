@@ -4,7 +4,13 @@
   const header = document.querySelector('.question-header .question-text');
   const form = header?.closest('form');
   const labels = Array.from(form?.querySelectorAll('.options-container label.option-label') || []);
-  const question = clean(header?.innerText || header?.textContent).replace(/^\d+[.)]\s*/, '');
+  const topicNode = document.querySelector('.question-tema-prefix, [class*="tema-prefix"]')
+    || document.querySelector('[data-topic-name], [data-tema], [class*="topic-prefix"]');
+  const topicHint = clean(topicNode?.innerText || topicNode?.textContent
+    || topicNode?.getAttribute('data-topic-name') || topicNode?.getAttribute('data-tema'));
+  const rawQuestion = clean(header?.innerText || header?.textContent);
+  const topicPrefix = topicNode && header?.contains(topicNode) ? clean(topicNode.innerText || topicNode.textContent) : '';
+  const question = clean(topicPrefix ? rawQuestion.replace(topicPrefix, '') : rawQuestion).replace(/^\d+[.)]\s*/, '');
   if (!question || labels.length !== 4) return alert('Abre un test con una pregunta de cuatro opciones.');
   if (header.querySelector('img, canvas, video, svg') || labels.some(el => el.querySelector('img, canvas, video, svg'))) {
     return alert('Esta pregunta contiene imágenes y no puede importarse con el marcador.');
