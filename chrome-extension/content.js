@@ -10,6 +10,7 @@
   const TOPIC_ALIASES = [
     [/^decreto legislativo 1\s*\/\s*2006\b/i, 'Tema 04. DL 1 2006.pdf'],
     [/^dl\s*1\s*\/\s*2006\b/i, 'Tema 04. DL 1 2006.pdf'],
+    [/^territorio\s+cam(?:\s*,\s*carreteras)?\b/i, 'Tema 08. Territorio y Red de infraestructuras de la CM.pdf'],
     [/^soporte vital b[aá]sico\s*2\b/i, 'Tema 13. SVB II.pdf'],
     [/^svb\s*ii\b/i, 'Tema 13. SVB II.pdf'],
     [/^svb\s*i\b/i, 'Tema 12. SVB I (trampeado de Cecop).pdf']
@@ -55,7 +56,7 @@
 
   function correctAnswerText() {
     const nodes = Array.from(document.querySelectorAll(
-      '#moreOptionsPopup p, [class*="respuesta"], [data-correct-answer]'
+      '#moreOptionsPopup p, #comentariosPopup .explicacion-pregunta-body p.fuente, [class*="respuesta"], [data-correct-answer]'
     ));
     for (const node of nodes) {
       const value = text(node);
