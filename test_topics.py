@@ -99,7 +99,7 @@ class TopicTests(unittest.TestCase):
         self.assertEqual(json.loads(self.row(4)["options_json"]), OPTIONS)
         self.assertIsNone(self.row(4)["source_url"])
 
-    def test_auto_detect_bombea_topic_and_store_allowed_origin_link(self):
+    def test_auto_detect_bombea_topic_and_store_source_link(self):
         self.assertEqual(detect_topic_id("Decreto Legislativo 1/2006, Tº Preliminar"), 4)
         self.save(
             topic_hint="Decreto Legislativo 1/2006, Tº Preliminar",
@@ -107,6 +107,7 @@ class TopicTests(unittest.TestCase):
         )
         self.assertEqual(self.row(4)["topic_id"], 4)
         self.assertEqual(self.row(4)["source_url"], "https://bombea.madrid/generador/index.html?return=%2Ftest")
+        self.assertIn(b"Abrir en Testazo/Bombea", self.client.get("/questions").data)
 
     def test_testazo_topic_detection_and_source_url_validation(self):
         self.assertEqual(detect_topic_id("Tema 13. SVB II.pdf - pregunta"), 13)
@@ -121,28 +122,11 @@ class TopicTests(unittest.TestCase):
         self.save(source_url="https://evil.example/phishing")
         self.assertIsNone(self.row(4)["source_url"])
 
-    def test_auto_detect_bombea_topic_and_store_source_link(self):
-        self.assertEqual(detect_topic_id("Decreto Legislativo 1/2006, Tº Preliminar"), 4)
-        self.save(
-            topic_hint="Decreto Legislativo 1/2006, Tº Preliminar",
-            source_url="https://bombea.madrid/generador/index.html?return=%2Ftest",
-        )
-        self.assertEqual(self.row(4)["topic_id"], 4)
-        self.assertEqual(self.row(4)["source_url"], "https://bombea.madrid/generador/index.html?return=%2Ftest")
-        self.assertIn(b"Abrir en Testazo/Bombea", self.client.get("/questions").data)
-
-    def test_testazo_topic_detection_and_source_url_validation(self):
-        self.assertEqual(detect_topic_id("Tema 13. SVB II.pdf"), 13)
-        self.save(
-            topic_hint="Tema 13. SVB II.pdf",
-            source_url="https://app.testazo.com/test/question/123",
-        )
-        self.assertEqual(self.row(4)["topic_id"], 13)
-        self.assertEqual(self.row(4)["source_url"], "https://app.testazo.com/test/question/123")
-
-    def test_untrusted_source_url_is_not_stored(self):
-        self.save(source_url="https://evil.example/phishing")
-        self.assertIsNone(self.row(4)["source_url"])
+    def test_save_topic_and_duplicate_does_not_overwrite(self):
+        self.save(topic_id="35")
+        self.save(topic_id="1")
+        self.assertEqual(self.row(4)["topic_id"], 35)
+        self.assertIsNone(self.row(5))
 
     def test_invalid_save_does_not_insert(self):
         self.save(topic_id="36")
