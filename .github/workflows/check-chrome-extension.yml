@@ -22,5 +22,6 @@ jobs:
       - run: node --check chrome-extension/background.js
       - run: node --check chrome-extension/content.js
       - run: node --check chrome-extension/app-bridge.js
+      - run: node chrome-extension/test-bombea.js chrome-extension/content.js
       - name: Validate manifest JSON
         run: node -e "JSON.parse(require('fs').readFileSync('chrome-extension/manifest.json', 'utf8'))"
