@@ -32,7 +32,7 @@ class Element {
   closest() { return null; }
   matches(selector) {
     return selector.includes('.option-label-correct')
-      && this.className.split(/\\s+/).includes('option-label-correct');
+      && this.className.split(/\s+/).includes('option-label-correct');
   }
   insertAdjacentElement(_position, element) { element.previousElementSibling = this; }
   appendChild(element) {
