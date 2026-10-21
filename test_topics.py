@@ -111,6 +111,7 @@ class TopicTests(unittest.TestCase):
 
     def test_testazo_topic_detection_and_source_url_validation(self):
         self.assertEqual(detect_topic_id("Tema 13. SVB II.pdf - pregunta"), 13)
+        self.assertEqual(detect_topic_id("Soporte Vital Básico 2, Instrumentalizar SVB"), 13)
         self.save(
             topic_hint="Tema 13. SVB II.pdf",
             source_url="https://app.testazo.com/test/question/123",
