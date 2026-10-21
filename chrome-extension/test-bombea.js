@@ -127,6 +127,16 @@ assert.ok(
   !String(button.style.cssText || '').includes('position:fixed'),
   'save control should not float over the page'
 );
+const buttonStyle = String(button.style.cssText || '');
+assert.match(buttonStyle, /display:inline-flex!important/, 'Bombea control should remain visible inline');
+assert.match(buttonStyle, /width:44px!important/, 'Bombea control should be compact');
+assert.match(button.innerHTML, /<svg/, 'Bombea control should show an icon without a text label');
+if (process.argv[3]) {
+  const manifest = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+  const matches = manifest.content_scripts[0].matches;
+  assert.ok(matches.includes('https://bombea.madrid/*'), 'manifest should include Bombea root domain');
+  assert.ok(matches.includes('https://*.bombea.madrid/*'), 'manifest should include Bombea subdomains');
+}
 
 clickHandlers.get(button.id)();
 assert.equal(sent.length, 1, 'click should start one import');
