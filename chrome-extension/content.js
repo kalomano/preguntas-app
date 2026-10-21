@@ -26,7 +26,7 @@
 
   function extractTopic(questionNode) {
     const explicit = document.querySelector(
-      '.question-tema-prefix, [data-topic-name], [data-tema], [class*="tema-prefix"], [class*="topic-prefix"]'
+      '.question-tema-prefix, [data-topic-name], [data-tema], [class*="tema-prefix"], [class*="topic-prefix"], .header-title'
     );
     if (explicit) return topicFrom(text(explicit));
     const q = text(questionNode);
@@ -36,15 +36,15 @@
 
   function questionNode() {
     return document.querySelector(
-      '#questionText, [data-question-text], .question-text, .question.title-md, [class~="pregunta"]'
+      '#questionText, [data-question-text], .question-header .question-text, .question-text, .question.title-md, [class~="pregunta"]'
     );
   }
 
   function optionNodes() {
-    const container = document.querySelector('#optionsContainer, [data-options], .options');
+    const container = document.querySelector('#optionsContainer, [data-options], .options, .options-container');
     if (!container) return [];
     let nodes = Array.from(container.querySelectorAll(
-      'button.option, [role="option"], .option'
+      'button.option, [role="option"], .option, label.option-label'
     ));
     if (nodes.length !== 4) {
       nodes = Array.from(container.querySelectorAll('.texto-opcion, [data-option]'));
@@ -75,14 +75,14 @@
       throw new Error('No pude identificar la pregunta y sus cuatro respuestas.');
     }
 
-    let texts = candidates.map(text);
+    let texts = candidates.map(node => text(node).replace(/^[a-d][).]\\s*/i, ''));
     const prefixNode = question.querySelector('.question-tema-prefix');
-    let prompt = text(question);
+    let prompt = text(question).replace(/^\\d+\\.\\s*/, '');
     if (prefixNode) prompt = clean(prompt.slice(text(prefixNode).length));
     if (!prompt) throw new Error('La pregunta aparece vacía.');
 
     const right = candidates.findIndex(node =>
-      node.matches('.correct, .is-correct, [data-correct="true"], [aria-label*="correcta" i]')
+      node.matches('.correct, .is-correct, .option-label-correct, [data-correct="true"], [aria-label*="correcta" i]')
     );
     let correctIndex = right;
     if (correctIndex < 0) {
