@@ -9,7 +9,9 @@
     && data.options.every((opt, i) => opt && opt.letter === 'abcd'[i]
       && typeof opt.text === 'string' && opt.text.length > 0 && opt.text.length <= 12000)
     && Number.isInteger(data.correct_index) && data.correct_index >= 0 && data.correct_index < 4
-    && typeof data.source_url === 'string' && data.source_url.startsWith('https://app.testazo.com/')
+    && typeof data.source_url === 'string'
+    && ['https://app.testazo.com/', 'https://bombea.madrid/'].some(prefix => data.source_url.startsWith(prefix))
+    && (!data.topic_hint || (typeof data.topic_hint === 'string' && data.topic_hint.length <= 300))
     && typeof data.created_at === 'number' && Date.now() >= data.created_at
     && Date.now() - data.created_at < 3600000;
   let pending = null;
@@ -54,6 +56,8 @@
     form.set('question', pending.question);
     form.set('options_json', JSON.stringify(pending.options));
     form.set('correct_index', String(pending.correct_index));
+    form.set('source_url', pending.source_url);
+    if (pending.topic_hint) form.set('topic_hint', pending.topic_hint);
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 90000);
