@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import psycopg
 import pytesseract
-from flask import Flask, flash, redirect, render_template_string, request, session, url_for
+from flask import Flask, flash, redirect, render_template, render_template_string, request, session, url_for
 from topics import TOPICS, detect_topic_id, migrate_topics, parse_topic, topic_filter, topic_select
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
@@ -80,7 +80,7 @@ def page(body: str, title="Mis preguntas", **ctx):
     global _PAGE_TEMPLATE
     if _PAGE_TEMPLATE is None:
         template_source = """<!doctype html><html lang='es'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='icon' href='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>'><title>{{ title }}</title><style>""" + CSS + """</style></head><body><main>
-    {% if session.get('user_id') %}<nav><a href='{{ url_for("index") }}'>Inicio</a><a href='{{ url_for("upload") }}'>Añadir</a><a href='{{ url_for("questions") }}'>Guardadas</a><a href='{{ url_for("users") }}'>Cambiar usuario</a></nav>{% endif %}
+    {% if session.get('user_id') %}<nav><a href='{{ url_for("index") }}'>Inicio</a><a href='{{ url_for("upload") }}'>Añadir</a><a href='{{ url_for("questions") }}'>Guardadas</a><a href='{{ url_for("testazo_installer") }}'>Testazo</a><a href='{{ url_for("users") }}'>Cambiar usuario</a></nav>{% endif %}
 
     {% with messages = get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class='flash {{cat}}'>{{msg}}</div>{% endfor %}{% endwith %}
 
@@ -751,10 +751,15 @@ def get_users():
 
 @app.before_request
 def require_user():
-    allowed = {"users", "select_user", "static", "safari_installer"}
+    allowed = {"users", "select_user", "static", "safari_installer", "testazo_installer"}
     if request.endpoint not in allowed and current_user_id() is None:
         return redirect(url_for("users"))
     return None
+
+
+@app.get("/testazo")
+def testazo_installer():
+    return page(render_template("testazo.html"), "Testazo: descargar, instalar y usar")
 
 
 @app.route("/safari")
@@ -813,6 +818,7 @@ def users():
     <h2 style='margin-top:30px'>Crear usuario nuevo</h2>
     <form method='post' action='""" + url_for("create_user") + """'><input type='text' name='name' maxlength='80' placeholder='Tu nombre' required autofocus><div class='actions'><button class='btn' type='submit'>Crear y entrar</button></div></form>
     </section>"""
+    body += f"""<div class='actions'><a class='btn' href='{url_for('testazo_installer')}'>Testazo: descargar e instalar</a></div>"""
     return page(body, "Elegir usuario")
 
 
@@ -888,7 +894,7 @@ def index():
     user_name = summary["name"]
     count = summary["n"]
     body = f"""<section class='card'><span class='badge'>Usuario: {escape(user_name)}</span><h1>Mis preguntas</h1><p class='big'>{count} guardadas</p><div class='actions'>
-    <a class='btn primary' href='{url_for('upload')}'>Añadir captura</a><a class='btn' href='{url_for('practice',mode='random')}'>Pregunta aleatoria</a><a class='btn' href='{url_for('practice',mode='all')}'>Hacerlas todas</a></div></section>
+    <a class='btn primary' href='{url_for('upload')}'>Añadir captura</a><a class='btn' href='{url_for('practice',mode='random')}'>Pregunta aleatoria</a><a class='btn' href='{url_for('practice',mode='all')}'>Hacerlas todas</a><a class='btn' href='{url_for('testazo_installer')}'>Testazo: descargar e instalar</a></div></section>
     <p class='muted'>Tus preguntas son independientes de las de los demás usuarios.</p>"""
     body += f"""<details class='card'><summary>Practicar por tema (opcional)</summary>
     <form method='get' action='{url_for("practice")}'>
