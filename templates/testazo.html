@@ -1,0 +1,70 @@
+<style>
+  .testazo-guide .btn{box-sizing:border-box}
+  .testazo-guide ol{padding-left:25px;font-size:17px;line-height:1.7}
+  .testazo-guide li+li{margin-top:12px}
+  .testazo-guide h2{margin-top:32px}
+  .testazo-guide code{overflow-wrap:anywhere;background:#f1f5f9;padding:2px 5px;border-radius:4px}
+  .testazo-guide details{border-top:1px solid #e5e7eb;padding:16px 0}
+  .testazo-guide summary{cursor:pointer;font-weight:700;line-height:1.5}
+  .testazo-guide a:focus-visible{outline:3px solid #0f766e;outline-offset:3px}
+  .testazo-guide .notice{padding:14px 16px;background:#f0fdfa;border-left:4px solid #0d9488;border-radius:8px}
+</style>
+<section class="card testazo-guide">
+  <span class="badge">Testazo → Mis Preguntas</span>
+  <h1>Guarda tus preguntas de Testazo con un clic</h1>
+  <p>Descarga la extensión, instálala una sola vez y guarda las preguntas que quieras repasar en tu usuario de Mis Preguntas.</p>
+  <div class="actions">
+    <a class="btn primary" href="{{ url_for('static', filename='downloads/Testazo_MisPreguntas_INSTALAR_v1.1.1.zip') }}" download="Testazo_MisPreguntas_INSTALAR_v1.1.1.zip">Descargar extensión para Testazo (.zip)</a>
+    <a class="btn" href="#instalar">Cómo instalarla</a>
+    <a class="btn" href="#usar">Cómo usarla</a>
+  </div>
+  <p class="muted">Para Google Chrome en ordenador. El ZIP se instala manualmente siguiendo los pasos de abajo.</p>
+
+  <h2 id="instalar">1. Instala la extensión</h2>
+  <ol>
+    <li><strong>Descarga y descomprime el ZIP.</strong> En Windows, haz clic derecho en el archivo y elige <strong>Extraer todo</strong>. En Mac, haz doble clic. Conserva la carpeta extraída después de instalar.</li>
+    <li>Abre Chrome, escribe <code>chrome://extensions</code> en la barra de direcciones y pulsa Intro.</li>
+    <li>Activa <strong>Modo de desarrollador</strong>, arriba a la derecha. Si ya tienes instalada una versión anterior de <strong>Testazo → Mis Preguntas</strong>, elimínala para evitar duplicados.</li>
+    <li>Pulsa <strong>Cargar descomprimida</strong> y selecciona la carpeta extraída que contiene <code>manifest.json</code>. Selecciona la carpeta, no el ZIP. Este archivo incluye también una subcarpeta con otra copia: solo tienes que cargar una de ellas.</li>
+    <li>Comprueba que aparece <strong>Testazo → Mis Preguntas</strong> y está activada. En el icono de la pieza de puzle de Chrome, puedes pulsar la chincheta para dejar la extensión visible.</li>
+    <li>Si tenías Testazo abierto, <strong>recarga su pestaña</strong> para que aparezca el botón de guardar.</li>
+  </ol>
+
+  <h2 id="usar">2. Guarda tu primera pregunta</h2>
+  <ol>
+    <li><a href="{{ url_for('users') }}">Selecciona o crea tu usuario en Mis Preguntas</a>. Las preguntas se guardan en el usuario que tengas seleccionado en ese navegador.</li>
+    <li>Abre <a href="https://app.testazo.com/app/make-tests" target="_blank" rel="noopener noreferrer">Testazo</a>, inicia sesión si hace falta y empieza un test en <strong>modo estudio</strong>.</li>
+    <li><strong>Responde la pregunta.</strong> Espera a que Testazo muestre la respuesta correcta en verde.</li>
+    <li>Pulsa <strong>Guardar en Preguntas</strong>, el botón verde azulado junto al reloj de Testazo. También puedes pulsar una vez el icono de la extensión en la barra de Chrome.</li>
+    <li><strong>Espera al aviso de éxito.</strong> El primer guardado puede tardar más mientras se despierta la web. Después, entra en <a href="{{ url_for('questions') }}">Guardadas</a> y recarga la página si ya la tenías abierta.</li>
+  </ol>
+  <p class="notice">Solo guarda preguntas de texto con cuatro opciones y la respuesta correcta ya visible. Las preguntas con imágenes deben añadirse mediante una captura.</p>
+
+  <h2>Qué significa el icono</h2>
+  <ul style="font-size:17px;line-height:1.8">
+    <li><strong>✓</strong>: pregunta guardada correctamente.</li>
+    <li><strong>=</strong>: la pregunta ya estaba guardada.</li>
+    <li><strong>···</strong>: guardado en curso; espera a que termine.</li>
+    <li><strong>!</strong>: ha ocurrido un error. Pon el ratón sobre el icono para leer el mensaje.</li>
+    <li><strong>WEB</strong>: abre una pregunta de Testazo para poder guardar.</li>
+  </ul>
+
+  <h2>Si algo no funciona</h2>
+  <details>
+    <summary>No aparece el botón en Testazo</summary>
+    <p>Comprueba que la extensión está activada en <code>chrome://extensions</code> y recarga la pestaña de Testazo. Abre una pregunta en modo estudio. También puedes guardar desde el icono de la extensión.</p>
+  </details>
+  <details>
+    <summary>Chrome dice que no encuentra el manifiesto</summary>
+    <p>Descomprime el archivo antes de cargarlo. Selecciona una carpeta que contenga directamente <code>manifest.json</code>, <code>background.js</code> y <code>content.js</code>. No selecciones el ZIP ni una carpeta superior a la que contiene esos archivos.</p>
+  </details>
+  <details>
+    <summary>No guarda, tarda o me pide elegir usuario</summary>
+    <p>Abre Mis Preguntas y selecciona tu usuario. Vuelve a Testazo y comprueba que ya has respondido y se ve la solución en verde. Si la web estaba inactiva, deja que termine de cargar. Si aparece un error de conexión, revisa primero Guardadas antes de volver a pulsar el botón.</p>
+  </details>
+  <details>
+    <summary>¿Sirve en iPad o iPhone?</summary>
+    <p>Este ZIP es para Chrome en ordenador. Para Safari en iPad tienes otra opción: <a href="{{ url_for('safari_installer') }}">configurar el favorito Guardar pregunta</a>.</p>
+  </details>
+  <div class="actions"><a class="btn" href="{{ url_for('index') if session.get('user_id') else url_for('users') }}">Volver a Mis Preguntas</a></div>
+</section>
